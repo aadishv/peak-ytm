@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "SF Pro Display", "SF Pro Text", Helvetica, sans-serif;
+  --font-mono: "JetBrainsMono Nerd Font Mono", Helvetica, monospace;
+}
