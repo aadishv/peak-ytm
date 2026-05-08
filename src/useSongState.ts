@@ -1,20 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-
-type MediaState = {
-  title?: string;
-  artist?: string | null;
-  album?: string | null;
-  playing?: boolean;
-  artworkData?: string | null;
-  artworkMimeType?: string | null;
-  elapsedTimeMicros?: number | null;
-  durationMicros?: number | null;
-  timestampEpochMicros?: number | null;
-  playbackRate?: number | null;
-  prohibitsSkip?: boolean | null;
-  uniqueIdentifier?: string | null;
-  contentItemIdentifier?: string | null;
-};
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CommandMessage, CommandSymbol, MediaState } from "./schemas";
 
 type ArtworkState = {
   data: string;
@@ -30,19 +15,7 @@ type PlaybackOverride = {
   trackKey: string;
 };
 
-const CONTROL_COMMANDS = ["previous-track", "toggle-play-pause", "next-track"] as const;
-
-type ControlCommand = (typeof CONTROL_COMMANDS)[number];
-
-function formatMeta(mediaState: MediaState | null): string {
-  if (!mediaState?.title) {
-    return "Waiting for MediaRemote…";
-  }
-
-  return [mediaState.artist, mediaState.album]
-    .filter((part): part is string => Boolean(part?.trim()))
-    .join(" — ") || "Unknown album";
-}
+type SocketCommandMessage = CommandMessage;
 
 function getTrackKey(mediaState: MediaState | null): string {
   if (!mediaState?.title) {
@@ -84,34 +57,27 @@ function getOverrideElapsedMicros(override: PlaybackOverride | null): number {
   return Math.max(0, override.elapsedMicros + (Date.now() - override.startedAtMs) * 1000 * override.playbackRate);
 }
 
-async function postJson(path: string, body: Record<string, unknown>): Promise<void> {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { error?: string } | null;
-    throw new Error(payload?.error ?? "Request failed");
-  }
-}
-
 function decodeArtwork(artworkState: ArtworkState): string {
   const binary = Uint8Array.from(atob(artworkState.data), (char) => char.charCodeAt(0));
   return URL.createObjectURL(new Blob([binary], { type: artworkState.mimeType }));
 }
 
+function getSocketUrl(): string {
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${location.host}/ws`;
+}
+
 export function useSongState() {
   const [mediaState, setMediaState] = useState<MediaState | null>(null);
   const [status, setStatus] = useState("Connecting…");
-  const [controlsBusy, setControlsBusy] = useState(true);
+  const [socketReady, setSocketReady] = useState(false);
   const [artworkState, setArtworkState] = useState<ArtworkState | null>(null);
   const [playbackOverride, setPlaybackOverride] = useState<PlaybackOverride | null>(null);
   const [isSeeking, setIsSeeking] = useState(false);
   const [pendingSeekMicros, setPendingSeekMicros] = useState<number | null>(null);
   const [, setFrame] = useState(0);
 
+  const socketRef = useRef<WebSocket | null>(null);
   const trackKey = useMemo(() => getTrackKey(mediaState), [mediaState]);
 
   useEffect(() => {
@@ -127,20 +93,33 @@ export function useSongState() {
   }, []);
 
   useEffect(() => {
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
     let disposed = false;
 
     const connect = () => {
-      socket = new WebSocket(`${protocol}//${location.host}/ws`);
+      const socket = new WebSocket(getSocketUrl());
+      socketRef.current = socket;
 
       socket.addEventListener("open", () => {
+        if (disposed) {
+          return;
+        }
+
+        setSocketReady(true);
         setStatus("Connected");
       });
 
       socket.addEventListener("message", (event) => {
-        setMediaState(JSON.parse(String(event.data)) as MediaState | null);
+        if (disposed) {
+          return;
+        }
+
+        try {
+          const nextState = JSON.parse(String(event.data)) as MediaState;
+          setMediaState(nextState);
+        } catch {
+          setStatus("Invalid state");
+        }
       });
 
       socket.addEventListener("close", () => {
@@ -148,13 +127,18 @@ export function useSongState() {
           return;
         }
 
+        setSocketReady(false);
         setStatus("Reconnecting…");
         reconnectTimer = window.setTimeout(connect, 1000);
       });
 
       socket.addEventListener("error", () => {
+        if (disposed) {
+          return;
+        }
+
         setStatus("Socket error");
-        socket?.close();
+        socket.close();
       });
     };
 
@@ -162,10 +146,12 @@ export function useSongState() {
 
     return () => {
       disposed = true;
+      setSocketReady(false);
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
       }
-      socket?.close();
+      socketRef.current?.close();
+      socketRef.current = null;
     };
   }, []);
 
@@ -185,12 +171,10 @@ export function useSongState() {
   useEffect(() => {
     if (!mediaState?.title) {
       setArtworkState(null);
-      setControlsBusy(true);
-      setStatus("Idle");
+      setStatus(socketReady ? "Idle" : "Connecting…");
       return;
     }
 
-    setControlsBusy(false);
     setStatus(mediaState.playing ? "Playing" : "Paused");
 
     const { artworkData, artworkMimeType } = mediaState;
@@ -216,7 +200,7 @@ export function useSongState() {
         trackKey,
       };
     });
-  }, [mediaState, trackKey]);
+  }, [mediaState, socketReady, trackKey]);
 
   const imageUrl = useMemo(() => artworkState ? decodeArtwork(artworkState) : null, [artworkState]);
 
@@ -230,6 +214,15 @@ export function useSongState() {
     };
   }, [imageUrl]);
 
+  const sendMessage = useCallback((message: SocketCommandMessage) => {
+    const socket = socketRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      throw new Error("Socket disconnected");
+    }
+
+    socket.send(JSON.stringify(message));
+  }, []);
+
   const durationMicros = mediaState?.durationMicros ?? 0;
   const elapsedMicros = isSeeking && pendingSeekMicros !== null
     ? pendingSeekMicros
@@ -237,24 +230,22 @@ export function useSongState() {
       ? getOverrideElapsedMicros(playbackOverride)
       : getBackendElapsedMicros(mediaState);
   const progressRatio = durationMicros > 0 ? Math.min(elapsedMicros / durationMicros, 1) : 0;
+  const controlsBusy = !socketReady;
 
-  const handleControl = async (command: ControlCommand): Promise<void> => {
+  const handleCommand = useCallback(async (command: CommandSymbol): Promise<void> => {
     try {
-      setControlsBusy(true);
-      await postJson("/api/control", { command });
+      sendMessage({ type: "command", command });
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Control failed");
-    } finally {
-      setControlsBusy(false);
     }
-  };
+  }, [sendMessage]);
 
-  const handleSeekInput = (value: string): void => {
+  const handleSeekInput = useCallback((value: string): void => {
     setIsSeeking(true);
     setPendingSeekMicros(durationMicros * Number(value));
-  };
+  }, [durationMicros]);
 
-  const handleSeekCommit = async (): Promise<void> => {
+  const handleSeekCommit = useCallback(async (): Promise<void> => {
     setIsSeeking(false);
 
     if (pendingSeekMicros === null) {
@@ -272,22 +263,19 @@ export function useSongState() {
     });
 
     try {
-      setControlsBusy(true);
-      await postJson("/api/seek", { positionSeconds: targetMicros / 1_000_000 });
+      sendMessage({ type: "seek", position: targetMicros / 1_000_000 });
     } catch (error) {
       setPlaybackOverride(null);
       setStatus(error instanceof Error ? error.message : "Seek failed");
-    } finally {
-      setControlsBusy(false);
     }
-  };
+  }, [durationMicros, mediaState?.playing, mediaState?.playbackRate, pendingSeekMicros, sendMessage, trackKey]);
 
   return {
     artworkState,
     controlsBusy,
     durationMicros,
     elapsedMicros,
-    handleControl,
+    handleCommand,
     handleSeekCommit,
     handleSeekInput,
     imageUrl,

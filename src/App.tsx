@@ -32,7 +32,7 @@ export function App() {
         controlsBusy,
         durationMicros,
         elapsedMicros,
-        handleControl,
+        handleCommand,
         handleSeekCommit,
         handleSeekInput,
         imageUrl,
@@ -143,19 +143,19 @@ export function App() {
 
             if (event.key === " " || event.code === "Space") {
                 event.preventDefault();
-                void handleControl("toggle-play-pause");
+                void handleCommand("_");
                 return;
             }
 
             if (event.key === "ArrowLeft") {
                 event.preventDefault();
-                void handleControl("previous-track");
+                void handleCommand("<");
                 return;
             }
 
             if (event.key === "ArrowRight") {
                 event.preventDefault();
-                void handleControl("next-track");
+                void handleCommand(">");
             }
         };
 
@@ -163,7 +163,7 @@ export function App() {
         return () => {
             window.removeEventListener("keydown", handleKeyDown);
         };
-    }, [handleControl]);
+    }, [handleCommand]);
 
     return (
         <div className="flex h-screen w-screen inset-0 fixed">
@@ -236,7 +236,7 @@ export function App() {
                                 Boolean(mediaState?.prohibitsSkip)
                             }
                             onClick={() => {
-                                void handleControl("previous-track");
+                                void handleCommand("<");
                             }}
                         >
                             <span className={symbolClassName}>
@@ -248,7 +248,7 @@ export function App() {
                             aria-label="Play or pause"
                             disabled={controlsBusy}
                             onClick={() => {
-                                void handleControl("toggle-play-pause");
+                                void handleCommand("_");
                             }}
                         >
                             <span className={`${symbolClassName} text-[44px]`}>
@@ -265,7 +265,7 @@ export function App() {
                                 Boolean(mediaState?.prohibitsSkip)
                             }
                             onClick={() => {
-                                void handleControl("next-track");
+                                void handleCommand(">");
                             }}
                         >
                             <span className={symbolClassName}>
