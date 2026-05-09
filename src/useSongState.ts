@@ -12,12 +12,6 @@ import Liricle from "liricle";
 import { useQuery } from "@tanstack/react-query";
 import { Value } from "@sinclair/typebox/value";
 
-type ArtworkState = {
-    data: string;
-    imageUrl: string;
-    mimeType: string;
-};
-
 type PlaybackOverride = {
     elapsedMicros: number;
     startedAtMs: number;
@@ -108,54 +102,6 @@ function useMediaState() {
         mediaState,
         sendCommand,
         sendSeek,
-    };
-}
-
-// handles allocating an object url
-function useArtwork(mediaState: MediaState | null) {
-    const [artworkState, setArtworkState] = useState<ArtworkState | null>(null);
-
-    const artworkData = mediaState?.artworkData;
-    const artworkMimeType = mediaState?.artworkMimeType;
-
-    useEffect(() => {
-        if (!artworkData || !artworkMimeType) {
-            setArtworkState(null);
-            return;
-        }
-
-        const binary = Uint8Array.from(atob(artworkData), (char) =>
-            char.charCodeAt(0),
-        );
-        const imageUrl = URL.createObjectURL(
-            new Blob([binary], { type: artworkMimeType }),
-        );
-
-        setArtworkState((current) => {
-            if (
-                current &&
-                current.mimeType === artworkMimeType &&
-                current.data === artworkData
-            ) {
-                URL.revokeObjectURL(imageUrl);
-                return current;
-            }
-
-            return {
-                data: artworkData,
-                imageUrl,
-                mimeType: artworkMimeType,
-            };
-        });
-
-        return () => {
-            URL.revokeObjectURL(imageUrl);
-        };
-    }, [artworkData, artworkMimeType]);
-
-    return {
-        artworkState,
-        imageUrl: artworkState?.imageUrl ?? null,
     };
 }
 
@@ -380,7 +326,10 @@ export function useSongState() {
     const [status, setStatus] = useState("Connecting…");
 
     const trackKey = useMemo(() => getTrackKey(mediaState), [mediaState]);
-    const { artworkState, imageUrl } = useArtwork(mediaState);
+    const imageUrl =
+        mediaState?.artworkData && mediaState.artworkMimeType
+            ? `data:${mediaState.artworkMimeType};base64,${mediaState.artworkData}`
+            : null;
     const {
         durationMicros,
         elapsedMicros,
@@ -415,7 +364,6 @@ export function useSongState() {
     );
 
     return {
-        artworkState,
         controlsBusy,
         durationMicros,
         elapsedMicros,
@@ -433,4 +381,4 @@ export function useSongState() {
     };
 }
 
-export type { ArtworkState, MediaState };
+export type { MediaState };

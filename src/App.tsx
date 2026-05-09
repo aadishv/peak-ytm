@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Texture } from "pixi.js";
-import { LyricsScene } from "./LyricsScene";
+import LyricsScene from "./LyricsScene";
 import { useSongState } from "./useSongState";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -13,9 +12,6 @@ const SYMBOLS = {
     next: "􀊌",
 };
 
-const symbolClassName =
-    "font-['SF_Pro_Text','SF_Pro_Display','-apple-system','BlinkMacSystemFont','sans-serif'] text-[30px] leading-none [font-synthesis:none] [-webkit-font-smoothing:antialiased]";
-
 function formatTime(micros: number): string {
     const totalSeconds = Math.max(0, Math.floor(micros / 1_000_000));
     const minutes = Math.floor(totalSeconds / 60);
@@ -24,15 +20,10 @@ function formatTime(micros: number): string {
 }
 
 function App() {
-    const canvasRef = useRef<HTMLCanvasElement | null>(null);
-    const sceneRef = useRef<LyricsScene | null>(null);
-    const artworkUrlRef = useRef<string | null>(null);
-    const artworkRequestIdRef = useRef(0);
     const albumPanelRef = useRef<HTMLDivElement | null>(null);
     const [albumPanelHeight, setAlbumPanelHeight] = useState(0);
 
     const {
-        artworkState,
         controlsBusy,
         durationMicros,
         elapsedMicros,
@@ -62,85 +53,6 @@ function App() {
         favicon.href = iconHref;
     }, [imageUrl]);
 
-    useEffect(() => {
-        const canvas = canvasRef.current;
-        if (!canvas) {
-            return;
-        }
-
-        const scene = new LyricsScene(canvas, Texture.WHITE);
-        sceneRef.current = scene;
-
-        const resize = () => {
-            const activeCanvas = canvasRef.current;
-            const activeScene = sceneRef.current;
-            if (!activeCanvas || !activeScene) {
-                return;
-            }
-
-            activeCanvas.width = window.innerWidth;
-            activeCanvas.height = window.innerHeight;
-            activeScene.resize(window.innerWidth, window.innerHeight);
-        };
-
-        resize();
-        window.addEventListener("resize", resize);
-
-        return () => {
-            window.removeEventListener("resize", resize);
-            scene.destroy();
-            sceneRef.current = null;
-        };
-    }, []);
-
-    useEffect(() => {
-        const scene = sceneRef.current;
-        if (!scene) {
-            return;
-        }
-
-        const requestId = artworkRequestIdRef.current + 1;
-        artworkRequestIdRef.current = requestId;
-
-        const applyArtwork = async () => {
-            if (!artworkState) {
-                if (artworkUrlRef.current) {
-                    URL.revokeObjectURL(artworkUrlRef.current);
-                    artworkUrlRef.current = null;
-                }
-                scene.updateArtwork(Texture.WHITE);
-                return;
-            }
-
-            if (artworkUrlRef.current) {
-                URL.revokeObjectURL(artworkUrlRef.current);
-            }
-
-            const binary = Uint8Array.from(atob(artworkState.data), (char) =>
-                char.charCodeAt(0),
-            );
-            const objectUrl = URL.createObjectURL(
-                new Blob([binary], { type: artworkState.mimeType }),
-            );
-            artworkUrlRef.current = objectUrl;
-
-            const image = new Image();
-            image.src = objectUrl;
-            await image.decode().catch(() => undefined);
-
-            if (requestId === artworkRequestIdRef.current) {
-                scene.updateArtwork(image);
-            }
-        };
-
-        void applyArtwork();
-
-        return () => {
-            if (requestId === artworkRequestIdRef.current) {
-                artworkRequestIdRef.current += 1;
-            }
-        };
-    }, [artworkState]);
 
     useEffect(() => {
         const isEditableTarget = (target: EventTarget | null): boolean => {
@@ -207,12 +119,13 @@ function App() {
         };
     }, [imageUrl, mediaState?.durationMicros, title, artist, album]);
 
+    if (!mediaState && !imageUrl && !title && !artist && !album) {
+        return <div></div>;
+    }
+
     return (
         <div className="flex h-screen w-screen inset-0 fixed items-center gap-10">
-            <canvas
-                ref={canvasRef}
-                className="fixed inset-0 block h-screen w-screen"
-            />
+            <LyricsScene artwork={imageUrl} />
             <section className="z-1 mx-auto flex items-start gap-10">
                 <div ref={albumPanelRef} className="flex max-w-100 flex-col">
                     <img
@@ -274,7 +187,7 @@ function App() {
                             </span>
                         </div>
 
-                        <div className="mt-4.5 flex items-center justify-center text-white">
+                        <div className="mt-4.5 flex items-center text-[30px] font-sans justify-center text-white">
                             <button
                                 className="size-14 flex-1"
                                 aria-label="Previous track"
@@ -286,25 +199,19 @@ function App() {
                                     void handleCommand("<");
                                 }}
                             >
-                                <span className={symbolClassName}>
-                                    {SYMBOLS.previous}
-                                </span>
+                                {SYMBOLS.previous}
                             </button>
                             <button
-                                className="size-14 flex-1"
+                                className="size-14 flex-1 text-[44px]"
                                 aria-label="Play or pause"
                                 disabled={controlsBusy}
                                 onClick={() => {
                                     void handleCommand("_");
                                 }}
                             >
-                                <span
-                                    className={`${symbolClassName} text-[44px]`}
-                                >
-                                    {mediaState?.playing
-                                        ? SYMBOLS.pause
-                                        : SYMBOLS.play}
-                                </span>
+                                {mediaState?.playing
+                                    ? SYMBOLS.pause
+                                    : SYMBOLS.play}
                             </button>
                             <button
                                 className="size-14 flex-1"
@@ -317,16 +224,14 @@ function App() {
                                     void handleCommand(">");
                                 }}
                             >
-                                <span className={symbolClassName}>
-                                    {SYMBOLS.next}
-                                </span>
+                                {SYMBOLS.next}
                             </button>
                         </div>
                     </div>
                 </div>
                 {lyrics.lyrics && (
                     <div
-                        className="max-w-100 overflow-y-auto whitespace-pre-wrap text-3xl font-bold flex gap-5 py-24 flex-col font-sans tracking-tight text-white no-scrollbar"
+                        className="max-w-100 overflow-y-auto whitespace-pre-wrap text-3xl font-bold flex gap-5 py-24 flex-col font-sans text-white no-scrollbar"
                         style={{
                             height: albumPanelHeight || undefined,
                             maskImage:
