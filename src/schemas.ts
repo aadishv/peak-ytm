@@ -50,8 +50,20 @@ export const CommandMessageSchema = Type.Union([
   }, { additionalProperties: true }),
 ]);
 
+export const LyricsResponseSchema = Type.Object({
+  id: Type.Number(),
+  trackName: Type.String(),
+  artistName: Type.String(),
+  albumName: Type.String(),
+  duration: Type.Number(),
+  instrumental: Type.Boolean(),
+  plainLyrics: Type.Optional(Type.String()),
+  syncedLyrics: Type.Optional(Type.String()),
+}, { additionalProperties: true });
+
 export type MediaState = Static<typeof MediaStateSchema>;
 export type StreamDataMessage = Static<typeof StreamDataMessageSchema>;
 export type StreamMessage = Static<typeof StreamMessageSchema>;
 export type CommandSymbol = Static<typeof CommandSymbolSchema>;
 export type CommandMessage = Static<typeof CommandMessageSchema>;
+export type LyricsResponse = Static<typeof LyricsResponseSchema>;

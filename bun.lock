@@ -7,6 +7,7 @@
       "dependencies": {
         "@sinclair/typebox": "^0.34.49",
         "bun-plugin-tailwind": "^0.1.2",
+        "liricle": "^4.2.0",
         "pixi-filters": "5.3.0",
         "pixi.js": "^7.4.3",
         "react": "^19.2.6",
@@ -242,6 +243,8 @@
     "hasown": ["hasown@2.0.3", "", { "dependencies": { "function-bind": "^1.1.2" } }, "sha512-ej4AhfhfL2Q2zpMmLo7U1Uv9+PyhIZpgQLGT1F9miIGmiCJIoCgSmczFdrc97mWT4kVY72KA+WnnhJ5pghSvSg=="],
 
     "ismobilejs": ["ismobilejs@1.1.1", "", {}, "sha512-VaFW53yt8QO61k2WJui0dHf4SlL8lxBofUuUmwBo0ljPk0Drz2TiuDW4jo3wDcv41qy/SxrJ+VAzJ/qYqsmzRw=="],
+
+    "liricle": ["liricle@4.2.0", "", {}, "sha512-NbXs+giTEXmcynnkrm4fhlDxAwLlXuFCyp4k4SjWIZl1CPafAPWWUmtZ8QZfUeI0hIwWBpAP5aP0YTvqhKVOXQ=="],
 
     "math-intrinsics": ["math-intrinsics@1.1.0", "", {}, "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g=="],
 

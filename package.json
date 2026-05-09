@@ -9,6 +9,7 @@
   "dependencies": {
     "@sinclair/typebox": "^0.34.49",
     "bun-plugin-tailwind": "^0.1.2",
+    "liricle": "^4.2.0",
     "pixi-filters": "5.3.0",
     "pixi.js": "^7.4.3",
     "react": "^19.2.6",

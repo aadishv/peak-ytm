@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Texture } from "pixi.js";
 import { LyricsScene } from "./LyricsScene";
 import { useSongState } from "./useSongState";
@@ -26,6 +26,8 @@ export function App() {
     const sceneRef = useRef<LyricsScene | null>(null);
     const artworkUrlRef = useRef<string | null>(null);
     const artworkRequestIdRef = useRef(0);
+    const albumPanelRef = useRef<HTMLDivElement | null>(null);
+    const [albumPanelHeight, setAlbumPanelHeight] = useState(0);
 
     const {
         artworkState,
@@ -40,9 +42,24 @@ export function App() {
         artist,
         album,
         progressRatio,
-        status,
+        plainLyrics,
+        syncedLyrics,
         title,
     } = useSongState();
+
+    useEffect(() => {
+        const iconHref = imageUrl ?? overlayImage;
+        let favicon =
+            document.querySelector<HTMLLinkElement>("link[rel='icon']");
+
+        if (!favicon) {
+            favicon = document.createElement("link");
+            favicon.rel = "icon";
+            document.head.appendChild(favicon);
+        }
+
+        favicon.href = iconHref;
+    }, [imageUrl]);
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -130,10 +147,12 @@ export function App() {
                 return false;
             }
 
-            return target.isContentEditable
-                || target instanceof HTMLInputElement
-                || target instanceof HTMLTextAreaElement
-                || target instanceof HTMLSelectElement;
+            return (
+                target.isContentEditable ||
+                target instanceof HTMLInputElement ||
+                target instanceof HTMLTextAreaElement ||
+                target instanceof HTMLSelectElement
+            );
         };
 
         const handleKeyDown = (event: KeyboardEvent) => {
@@ -165,116 +184,155 @@ export function App() {
         };
     }, [handleCommand]);
 
+    useEffect(() => {
+        const albumPanel = albumPanelRef.current;
+        if (!albumPanel) {
+            return;
+        }
+
+        const updateHeight = () => {
+            setAlbumPanelHeight(albumPanel.getBoundingClientRect().height);
+        };
+
+        updateHeight();
+
+        const observer = new ResizeObserver(() => {
+            updateHeight();
+        });
+        observer.observe(albumPanel);
+
+        return () => {
+            observer.disconnect();
+        };
+    }, [imageUrl, mediaState?.durationMicros, plainLyrics, syncedLyrics, title, artist, album]);
+
     return (
-        <div className="flex h-screen w-screen inset-0 fixed">
+        <div className="flex h-screen w-screen inset-0 fixed items-center gap-10">
             <canvas
                 ref={canvasRef}
                 className="fixed inset-0 block h-screen w-screen"
             />
-            <main className="mx-auto w-125 z-1 my-auto">
-                <img
-                    src={imageUrl ?? undefined}
-                    alt="Album artwork"
-                    className="size-full object-cover aspect-square mb-5 rounded-lg"
-                />
+            <section className="z-1 mx-auto flex items-start gap-10">
+                <div ref={albumPanelRef} className="flex max-w-100 flex-col">
+                    <img
+                        src={imageUrl ?? undefined}
+                        alt="Album artwork"
+                        className="size-full object-cover aspect-square mb-5 max-w-100 rounded-lg"
+                    />
 
-                <h1 className="m-0 font-sans text-lg text-white font-bold">
-                    {title}
-                </h1>
+                    <h1 className="m-0 font-sans text-lg text-white font-bold">
+                        {title}
+                    </h1>
 
-                <p className="mt-1 flex font-sans text-white/70 font-medium">
-                    <span className="mr-auto ">{artist}</span>
-                    <span className="ml-auto">{album}</span>
-                </p>
+                    <p className="mt-1 flex font-sans text-white/70 font-medium">
+                        <span className="mr-auto ">{artist}</span>
+                        <span className="ml-auto">{album}</span>
+                    </p>
 
-                <div
-                    className={
-                        mediaState?.durationMicros ? "mt-5 sm:mt-6" : "hidden"
-                    }
-                >
-                    <div className="relative">
-                        <div className="h-2 w-full overflow-hidden rounded-full bg-white/20">
-                            <div
-                                className="h-full rounded-full bg-[rgba(255,245,240,0.94)]"
-                                style={{ width: `${progressRatio * 100}%` }}
+                    <div
+                        className={
+                            mediaState?.durationMicros
+                                ? "mt-5 sm:mt-6"
+                                : "hidden"
+                        }
+                    >
+                        <div className="relative">
+                            <div className="h-2 w-full overflow-hidden rounded-full bg-white/20">
+                                <div
+                                    className="h-full rounded-full bg-[rgba(255,245,240,0.94)]"
+                                    style={{ width: `${progressRatio * 100}%` }}
+                                />
+                            </div>
+                            <input
+                                className="absolute inset-x-0 -inset-y-2.5 m-0 w-full cursor-pointer opacity-0 disabled:cursor-default"
+                                type="range"
+                                min="0"
+                                max="1"
+                                step="0.001"
+                                value={progressRatio}
+                                aria-label="Seek"
+                                disabled={controlsBusy || !durationMicros}
+                                onInput={(event) => {
+                                    handleSeekInput(event.currentTarget.value);
+                                }}
+                                onChange={() => {
+                                    void handleSeekCommit();
+                                }}
                             />
                         </div>
-                        <input
-                            className="absolute inset-x-0 -inset-y-2.5 m-0 w-full cursor-pointer opacity-0 disabled:cursor-default"
-                            type="range"
-                            min="0"
-                            max="1"
-                            step="0.001"
-                            value={progressRatio}
-                            aria-label="Seek"
-                            disabled={controlsBusy || !durationMicros}
-                            onInput={(event) => {
-                                handleSeekInput(event.currentTarget.value);
-                            }}
-                            onChange={() => {
-                                void handleSeekCommit();
-                            }}
-                        />
-                    </div>
 
-                    <div className="mt-2 flex justify-between gap-4 font-mono font-medium text-sm text-white/70">
-                        <span>{formatTime(elapsedMicros)}</span>
-                        <span>
-                            -
-                            {formatTime(
-                                Math.max(durationMicros - elapsedMicros, 0),
-                            )}
-                        </span>
-                    </div>
+                        <div className="mt-2 flex justify-between gap-4 font-mono font-medium text-sm text-white/70">
+                            <span>{formatTime(elapsedMicros)}</span>
+                            <span>
+                                -
+                                {formatTime(
+                                    Math.max(durationMicros - elapsedMicros, 0),
+                                )}
+                            </span>
+                        </div>
 
-                    <div className="mt-4.5 flex items-center justify-center text-white">
-                        <button
-                            className="size-14 flex-1"
-                            aria-label="Previous track"
-                            disabled={
-                                controlsBusy ||
-                                Boolean(mediaState?.prohibitsSkip)
-                            }
-                            onClick={() => {
-                                void handleCommand("<");
-                            }}
-                        >
-                            <span className={symbolClassName}>
-                                {SYMBOLS.previous}
-                            </span>
-                        </button>
-                        <button
-                            className="size-14 flex-1"
-                            aria-label="Play or pause"
-                            disabled={controlsBusy}
-                            onClick={() => {
-                                void handleCommand("_");
-                            }}
-                        >
-                            <span className={`${symbolClassName} text-[44px]`}>
-                                {mediaState?.playing
-                                    ? SYMBOLS.pause
-                                    : SYMBOLS.play}
-                            </span>
-                        </button>
-                        <button
-                            className="size-14 flex-1"
-                            aria-label="Next track"
-                            disabled={
-                                controlsBusy ||
-                                Boolean(mediaState?.prohibitsSkip)
-                            }
-                            onClick={() => {
-                                void handleCommand(">");
-                            }}
-                        >
-                            <span className={symbolClassName}>
-                                {SYMBOLS.next}
-                            </span>
-                        </button>
+                        <div className="mt-4.5 flex items-center justify-center text-white">
+                            <button
+                                className="size-14 flex-1"
+                                aria-label="Previous track"
+                                disabled={
+                                    controlsBusy ||
+                                    Boolean(mediaState?.prohibitsSkip)
+                                }
+                                onClick={() => {
+                                    void handleCommand("<");
+                                }}
+                            >
+                                <span className={symbolClassName}>
+                                    {SYMBOLS.previous}
+                                </span>
+                            </button>
+                            <button
+                                className="size-14 flex-1"
+                                aria-label="Play or pause"
+                                disabled={controlsBusy}
+                                onClick={() => {
+                                    void handleCommand("_");
+                                }}
+                            >
+                                <span
+                                    className={`${symbolClassName} text-[44px]`}
+                                >
+                                    {mediaState?.playing
+                                        ? SYMBOLS.pause
+                                        : SYMBOLS.play}
+                                </span>
+                            </button>
+                            <button
+                                className="size-14 flex-1"
+                                aria-label="Next track"
+                                disabled={
+                                    controlsBusy ||
+                                    Boolean(mediaState?.prohibitsSkip)
+                                }
+                                onClick={() => {
+                                    void handleCommand(">");
+                                }}
+                            >
+                                <span className={symbolClassName}>
+                                    {SYMBOLS.next}
+                                </span>
+                            </button>
+                        </div>
                     </div>
                 </div>
-            </main>
+                {
+                    syncedLyrics && plainLyrics && (
+                        <div
+                            className="max-w-100 overflow-y-auto whitespace-pre-wrap text-3xl font-semibold font-sans text-white no-scrollbar"
+                            style={{ height: albumPanelHeight || undefined }}
+                        >
+                            {syncedLyrics}
+                        </div>
+                    )
+                }
+            </section>
         </div>
     );
 }
+
