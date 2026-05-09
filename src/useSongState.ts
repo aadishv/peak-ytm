@@ -426,7 +426,7 @@ export function useSongState() {
         mediaState,
         progressRatio,
         status,
-        title: mediaState?.title ?? "Nothing playing",
+        title: mediaState?.title ?? "",
         artist: mediaState?.artist ?? null,
         album: mediaState?.album ?? null,
         lyrics,

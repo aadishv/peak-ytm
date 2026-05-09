@@ -341,7 +341,7 @@ function App() {
                                     "px-2" +
                                     (lyrics.focusedIndex === index
                                         ? ""
-                                        : " text-white/50 blur-[2px] transition-all")
+                                        : " text-white/50 blur-[2px] hover:blur-none transition-all duration-300")
                                 }
                             >
                                 {line.text}
