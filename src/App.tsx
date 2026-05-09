@@ -2,10 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Texture } from "pixi.js";
 import { LyricsScene } from "./LyricsScene";
 import { useSongState } from "./useSongState";
-import overlayImage from "./generated-icons/img2.jpeg";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { persistQueryClient } from "@tanstack/react-query-persist-client";
-import { createAsyncStoragePersister } from "@tanstack/query-async-storage-persister";
 
 const queryClient = new QueryClient();
 
@@ -52,7 +49,7 @@ function App() {
     } = useSongState();
 
     useEffect(() => {
-        const iconHref = imageUrl ?? overlayImage;
+        const iconHref = imageUrl ?? "about:blank";
         let favicon =
             document.querySelector<HTMLLinkElement>("link[rel='icon']");
 
