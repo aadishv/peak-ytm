@@ -1,19 +1,28 @@
 import { Value } from "@sinclair/typebox/value";
 import html from "../index.html";
 import {
+    ArtworkRelayRequestSchema,
     CommandMessageSchema,
-    LyricsResponse,
-    LyricsResponseSchema,
     MediaStateSchema,
     StreamMessageSchema,
+    type ArtworkRelayRequest,
     type CommandSymbol,
     type MediaState,
 } from "./schemas";
+
+type ArtworkCacheEntry = {
+    artworkData: string;
+    artworkMimeType: string;
+    artworkUrl: string;
+};
 
 class PlaybackManager {
     stream: Bun.Subprocess<"pipe", "pipe", "pipe">;
     state: MediaState;
     cacheFile: Bun.BunFile;
+    artworkCache: Map<string, ArtworkCacheEntry>;
+    // in flight artwork requests; once the promises are completed, they "feed" into artworkCache
+    artworkRequests: Map<string, Promise<void>>;
 
     private getAdapterPath(): string[] {
         return [
@@ -23,15 +32,28 @@ class PlaybackManager {
         ];
     }
 
-    private getTrackKey() {
-        if (
-            !this.state.title ||
-            !this.state.artist ||
-            !this.state.album ||
-            !this.state.durationMicros
-        )
-            return null;
-        return `${this.state.album}:${this.state.artist}:${this.state.title}:${Math.round(this.state.durationMicros / 1_000_000)}`;
+    private getTrackKey(state: Pick<MediaState, "title" | "artist" | "album">) {
+        if (!state.title) return null;
+        return `${state.title}::${state.artist ?? ""}::${state.album ?? ""}`;
+    }
+
+    private getPublicState(state: MediaState): MediaState {
+        const trackKey = this.getTrackKey(state);
+        const artwork = trackKey ? this.artworkCache.get(trackKey) : null;
+        if (!artwork) return state;
+        return {
+            ...state,
+            artworkData: artwork.artworkData,
+            artworkMimeType: artwork.artworkMimeType,
+        };
+    }
+
+    getSnapshot() {
+        return this.getPublicState(this.state);
+    }
+
+    private publishState() {
+        server.publish("state", JSON.stringify(this.getSnapshot()));
     }
 
     private async handleNewMessage(message: MediaState, diff: boolean) {
@@ -40,7 +62,61 @@ class PlaybackManager {
         } else {
             this.state = { ...this.state, ...message };
         }
-        server.publish("state", JSON.stringify(this.state));
+        this.publishState();
+    }
+
+    private async fetchArtwork(artworkUrl: string) {
+        const response = await fetch(artworkUrl);
+        if (!response.ok) {
+            throw new Error(`Artwork fetch failed with ${response.status}`);
+        }
+
+        const bytes = await response.arrayBuffer();
+        const mimeType = response.headers.get("content-type")?.split(";")[0]?.trim();
+        return {
+            artworkData: Buffer.from(bytes).toString("base64"),
+            artworkMimeType: mimeType || "image/jpeg",
+            artworkUrl,
+        } satisfies ArtworkCacheEntry;
+    }
+
+    async relayArtwork(payload: ArtworkRelayRequest) {
+        const trackKey = this.getTrackKey(payload);
+        if (!trackKey) {
+            throw new Error("Missing track key");
+        }
+
+        const cached = this.artworkCache.get(trackKey);
+        if (cached?.artworkUrl === payload.artworkUrl) {
+            if (this.getTrackKey(this.state) === trackKey) {
+                this.publishState();
+            }
+            return;
+        }
+
+        const existingRequest = this.artworkRequests.get(trackKey);
+        if (existingRequest) {
+            await existingRequest;
+            const refreshed = this.artworkCache.get(trackKey);
+            if (refreshed?.artworkUrl === payload.artworkUrl) {
+                return;
+            }
+        }
+
+        const request = (async () => {
+            const artwork = await this.fetchArtwork(payload.artworkUrl);
+            this.artworkCache.set(trackKey, artwork);
+            if (this.getTrackKey(this.state) === trackKey) {
+                this.publishState();
+            }
+        })();
+
+        this.artworkRequests.set(trackKey, request);
+        try {
+            await request;
+        } finally {
+            this.artworkRequests.delete(trackKey);
+        }
     }
 
     async watchStream() {
@@ -142,7 +218,26 @@ class PlaybackManager {
         ]);
         this.state = {};
         this.cacheFile = Bun.file("./cache.json");
+        this.artworkCache = new Map();
+        this.artworkRequests = new Map();
     }
+}
+
+const allowedRelayOrigins = new Set([
+    "https://music.youtube.com",
+    "https://www.youtube.com",
+]);
+
+function getRelayCorsHeaders(origin: string | null) {
+    return {
+        "access-control-allow-origin": origin && allowedRelayOrigins.has(origin)
+            ? origin
+            : "https://music.youtube.com",
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-headers": "content-type",
+        "access-control-max-age": "86400",
+        vary: "origin",
+    } as const;
 }
 
 const manager = new PlaybackManager();
@@ -158,10 +253,39 @@ const server = Bun.serve({
                 ? undefined
                 : new Response("WebSocket upgrade error", { status: 400 });
         },
+        "/api/ytm-artwork": async (req) => {
+            const corsHeaders = getRelayCorsHeaders(req.headers.get("origin"));
+
+            if (req.method === "OPTIONS") {
+                return new Response(null, { headers: corsHeaders });
+            }
+
+            if (req.method !== "POST") {
+                return new Response("Method Not Allowed", {
+                    status: 405,
+                    headers: corsHeaders,
+                });
+            }
+
+            try {
+                const json = await req.json();
+                const payload = Value.Parse(ArtworkRelayRequestSchema, json);
+                await manager.relayArtwork(payload);
+                return Response.json({ ok: true }, { headers: corsHeaders });
+            } catch (error) {
+                const message =
+                    error instanceof Error ? error.message : "Invalid artwork relay request";
+                return Response.json(
+                    { ok: false, error: message },
+                    { status: 400, headers: corsHeaders },
+                );
+            }
+        },
     },
     websocket: {
         open(ws) {
             ws.subscribe("state");
+            ws.send(JSON.stringify(manager.getSnapshot()));
         },
         message(_, msg) {
             let contents: string;
