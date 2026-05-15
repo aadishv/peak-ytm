@@ -8,8 +8,4 @@ I'll take PRs but would recommend you don't touch this codebase. It's hellish.
 
 ## YouTube Music support
 
-This app can also accept high-resolution artwork relayed from YouTube Music.
-
-To use it, install/enable `music.localhost.user.js` in a browser on `https://music.youtube.com/*`. Also make sure `music.localhost` is being served locally (or through the project's local HTTPS setup) so the script can POST to `https://music.localhost/api/ytm-artwork`.
-
-The userscript will upgrade artwork URLs when it can, then relay the metadata/artwork to the server.
+To use this app with YouTube Music, install `music.localhost.user.js`. Make sure the app is served `music.localhost`, using the [Caddyfile](./Caddyfile) or otherwise. YouTube Music's Now Playing state is still exposed and usable in the app without the userscript, but Chromium limitations only publish low-quality thumbnails from the media session API. The userscript bypasses this, giving the server a special path to upgrade artwork images to the high-res versions when possible.
