@@ -20,6 +20,21 @@ type PlaybackOverride = {
     trackKey: string;
 };
 
+declare global {
+    interface Window {
+        setLrcLyrics: (lyrics: string) => void;
+        resetLrcLyrics: () => void;
+    }
+}
+
+const LRC_OVERRIDE_EVENT = "lrc-lyrics-override-change";
+let lrcLyricsOverride: string | null = null;
+
+function setLrcLyricsOverride(lyrics: string | null): void {
+    lrcLyricsOverride = lyrics;
+    window.dispatchEvent(new Event(LRC_OVERRIDE_EVENT));
+}
+
 // exactly what it sounds like
 function getSocketUrl(): string {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -108,10 +123,28 @@ function useMediaState() {
 // caches, gets, & syncs lyrics
 // lyrics are always fresh or nonexistent
 function useLyrics(mediaState: MediaState | null, elapsedMicros: number) {
+    const [overrideLyrics, setOverrideLyrics] = useState<string | null>(lrcLyricsOverride);
+
+    useEffect(() => {
+        const handleOverrideChange = () => {
+            setOverrideLyrics(lrcLyricsOverride);
+        };
+
+        window.addEventListener(LRC_OVERRIDE_EVENT, handleOverrideChange);
+        return () => {
+            window.removeEventListener(LRC_OVERRIDE_EVENT, handleOverrideChange);
+        };
+    }, []);
+
     const lyrics = useQuery({
-        queryKey: ["lyrics", getTrackKey(mediaState)],
+        queryKey: ["lyrics", getTrackKey(mediaState), overrideLyrics],
         queryFn: async (options) => {
-            const storageKey = options.queryKey.join("::");
+            if (overrideLyrics !== null) {
+                return overrideLyrics;
+            }
+
+            const storageKey = options.queryKey.slice(0, 2).join("::");
+            console.log(storageKey);
             const lyrics = localStorage.getItem(storageKey);
             if (lyrics) return lyrics;
 
@@ -142,6 +175,7 @@ function useLyrics(mediaState: MediaState | null, elapsedMicros: number) {
                 return lyrics;
             } catch { return null; }
         },
+        enabled: overrideLyrics !== null || Boolean(mediaState),
     });
 
     const [liricle, setLiricle] = useState<Liricle | null>(null);
@@ -319,7 +353,14 @@ function usePlaybackClock(
     };
 }
 
-const liricle = new Liricle();
+if (typeof window !== "undefined") {
+    window.setLrcLyrics = (lyrics: string) => {
+        setLrcLyricsOverride(lyrics);
+    };
+    window.resetLrcLyrics = () => {
+        setLrcLyricsOverride(null);
+    };
+}
 
 export function useSongState() {
     const { isReady, mediaState, sendCommand, sendSeek } = useMediaState();

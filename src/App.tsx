@@ -239,7 +239,7 @@ function App() {
                     >
                         {lyrics.lyrics.map((line, index) => {
                             const blur =
-                                Math.log(Math.abs((lyrics.focusedIndex ?? 0) - index) * 10 + 1);
+                                Math.log(Math.abs((lyrics.focusedIndex ?? 0) - index) * 6 + 1);
                             return (
                                 <div
                                     key={index}
@@ -248,7 +248,7 @@ function App() {
                                         "px-2 transition-all duration-300" +
                                         (lyrics.focusedIndex === index
                                             ? "text-white/80"
-                                            : "blur-xl text-white/30")
+                                            : "blur-xl hover:blur-none! transition-all duration-400 text-white/30")
                                     }
                                     style={{
                                         filter: `blur(${blur}px)`,

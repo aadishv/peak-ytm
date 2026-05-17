@@ -17,6 +17,17 @@ export const MediaStateSchema = Type.Object({
   instrumental: Type.Optional(Type.Boolean()),
 }, { additionalProperties: true });
 
+export const LyricsResponseSchema = Type.Object({
+    id: Type.Number(),
+    trackName: Type.String(),
+    artistName: Type.String(),
+    albumName: Type.String(),
+    duration: Type.Number(),
+    instrumental: Type.Boolean(),
+    plainLyrics: Type.Optional(Type.String()),
+    syncedLyrics: Type.Optional(Type.String()),
+}, { additionalProperties: true });
+
 export const StreamDataMessageSchema = Type.Object({
   type: Type.Literal("data"),
   diff: Type.Boolean(),
