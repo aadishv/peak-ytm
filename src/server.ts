@@ -3,12 +3,15 @@ import html from "../index.html";
 import {
     ArtworkRelayRequestSchema,
     CommandMessageSchema,
+    LyricsResponseSchema,
     MediaStateSchema,
     StreamMessageSchema,
+    YtmLyricsRelayRequestSchema,
     type ArtworkRelayRequest,
     type CommandSymbol,
     type MediaState,
 } from "./schemas";
+import { Type } from "@sinclair/typebox";
 
 type ArtworkCacheEntry = {
     artworkData: string;
@@ -21,6 +24,7 @@ class PlaybackManager {
     state: MediaState;
     cacheFile: Bun.BunFile;
     artworkCache: Map<string, ArtworkCacheEntry>;
+    lyricsManager: LyricsManager;
     // in flight artwork requests; once the promises are completed, they "feed" into artworkCache
     artworkRequests: Map<string, Promise<void>>;
 
@@ -32,13 +36,13 @@ class PlaybackManager {
         ];
     }
 
-    private getTrackKey(state: Pick<MediaState, "title" | "artist" | "album">) {
+    static getTrackKey(state: Pick<MediaState, "title" | "artist" | "album">) {
         if (!state.title) return null;
-        return `${state.title}::${state.artist ?? ""}::${state.album ?? ""}`;
+        return `${state.title}::${state.artist ?? ""}`;
     }
 
     private getPublicState(state: MediaState): MediaState {
-        const trackKey = this.getTrackKey(state);
+        const trackKey = PlaybackManager.getTrackKey(state);
         const artwork = trackKey ? this.artworkCache.get(trackKey) : null;
         if (!artwork) return state;
         return {
@@ -53,6 +57,7 @@ class PlaybackManager {
     }
 
     private publishState() {
+        void this.lyricsManager.handleMediaState(this.getSnapshot());
         server.publish("state", JSON.stringify(this.getSnapshot()));
     }
 
@@ -81,14 +86,14 @@ class PlaybackManager {
     }
 
     async relayArtwork(payload: ArtworkRelayRequest) {
-        const trackKey = this.getTrackKey(payload);
+        const trackKey = PlaybackManager.getTrackKey(payload);
         if (!trackKey) {
             throw new Error("Missing track key");
         }
 
         const cached = this.artworkCache.get(trackKey);
         if (cached?.artworkUrl === payload.artworkUrl) {
-            if (this.getTrackKey(this.state) === trackKey) {
+            if (PlaybackManager.getTrackKey(this.state) === trackKey) {
                 this.publishState();
             }
             return;
@@ -106,7 +111,7 @@ class PlaybackManager {
         const request = (async () => {
             const artwork = await this.fetchArtwork(payload.artworkUrl);
             this.artworkCache.set(trackKey, artwork);
-            if (this.getTrackKey(this.state) === trackKey) {
+            if (PlaybackManager.getTrackKey(this.state) === trackKey) {
                 this.publishState();
             }
         })();
@@ -209,7 +214,7 @@ class PlaybackManager {
         await this.forceRefresh();
     }
 
-    constructor() {
+    constructor(lyrics: LyricsManager) {
         this.stream = Bun.spawn([
             ...this.getAdapterPath(),
             "stream",
@@ -220,6 +225,87 @@ class PlaybackManager {
         this.cacheFile = Bun.file("./cache.json");
         this.artworkCache = new Map();
         this.artworkRequests = new Map();
+        this.lyricsManager = lyrics;
+    }
+}
+
+export class LyricsManager {
+    cache: Bun.BunFile;
+    // in progress LRCLIB fetches
+    fetches: Map<string, Promise<void>>;
+
+    constructor() {
+        this.cache = Bun.file("./lyrics.json");
+        this.fetches = new Map();
+    }
+
+    async setLyrics(trackKey: string, lyrics: string, updateCache: boolean = true): Promise<void> {
+        if (updateCache) {
+            const cache = await this.cache.json();
+            cache[trackKey] = lyrics;
+            await this.cache.write(JSON.stringify(cache));
+        }
+        server.publish("lyrics", JSON.stringify({ trackKey, lyrics }));
+    }
+
+    async handleMediaState(state: MediaState): Promise<void> {
+        const cache = await this.cache.json();
+        const trackKey = PlaybackManager.getTrackKey(state);
+        if (!trackKey) return;
+        try {
+            const lyrics = Value.Parse(Type.String(), cache[trackKey]);
+            await this.setLyrics(trackKey, lyrics, false);
+            return
+        }
+        catch {
+            // no cached lyrics
+        }
+
+        if (this.fetches.has(trackKey)) { // already an lrclib check in progress
+            return;
+        }
+
+        try {
+            const lrcMisses = Value.Parse(Type.Array(Type.String()), cache["lrcMisses"] ?? []);
+            if (lrcMisses.includes(trackKey)) return;
+        }
+        catch {
+            // invalid lrcMisses, treat as empty
+        }
+
+        const fetchPromise = (async () => {
+            const params = new URLSearchParams({
+                track_name: state.title!,
+                artist_name: state.artist!,
+                album_name: state.album!,
+                duration: String(Math.round((state.durationMicros ?? 0) / 1_000_000)),
+            });
+
+            const response = await fetch(`https://lrclib.net/api/get?${params}`, {
+                headers: {
+                    accept: "application/json",
+                },
+            });
+
+            try {
+                const payload = await response.json();
+                const parsed = Value.Parse(LyricsResponseSchema, payload);
+                if (!parsed.syncedLyrics) throw new Error();
+                await this.setLyrics(trackKey, parsed.syncedLyrics);
+            } catch (e) {
+                const cache = await this.cache.json();
+                cache["lrcMisses"] = [...(cache["lrcMisses"] ?? []), trackKey];
+                await this.cache.write(JSON.stringify(cache));
+                return;
+            }
+        })();
+
+        this.fetches.set(trackKey, fetchPromise);
+        try {
+            await fetchPromise;
+        } finally {
+            this.fetches.delete(trackKey);
+        }
     }
 }
 
@@ -240,7 +326,8 @@ function getRelayCorsHeaders(origin: string | null) {
     } as const;
 }
 
-const manager = new PlaybackManager();
+const lyrics = new LyricsManager();
+const manager = new PlaybackManager(lyrics);
 await manager.forceRefresh();
 
 const server = Bun.serve({
@@ -281,10 +368,45 @@ const server = Bun.serve({
                 );
             }
         },
+        "/api/ytm-lyrics": async (req) => {
+            const corsHeaders = getRelayCorsHeaders(req.headers.get("origin"));
+
+            if (req.method === "OPTIONS") {
+                return new Response(null, { headers: corsHeaders });
+            }
+
+            if (req.method !== "POST") {
+                return new Response("Method Not Allowed", {
+                    status: 405,
+                    headers: corsHeaders,
+                });
+            }
+
+            try {
+                const json = await req.json();
+                const payload = Value.Parse(YtmLyricsRelayRequestSchema, json);
+                const trackKey = PlaybackManager.getTrackKey(manager.state);
+
+                if (!trackKey) {
+                    throw new Error("No active track");
+                }
+
+                await lyrics.setLyrics(trackKey, payload.lrc);
+                return Response.json({ ok: true }, { headers: corsHeaders });
+            } catch (error) {
+                const message =
+                    error instanceof Error ? error.message : "Invalid YTM lyrics relay request";
+                return Response.json(
+                    { ok: false, error: message },
+                    { status: 400, headers: corsHeaders },
+                );
+            }
+        },
     },
     websocket: {
         open(ws) {
             ws.subscribe("state");
+            ws.subscribe("lyrics");
             ws.send(JSON.stringify(manager.getSnapshot()));
         },
         message(_, msg) {
@@ -308,6 +430,7 @@ const server = Bun.serve({
         },
         close(ws) {
             ws.unsubscribe("state");
+            ws.unsubscribe("lyrics");
         },
     },
 });

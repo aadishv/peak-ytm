@@ -7,22 +7,31 @@ import {
     type Dispatch,
     type SetStateAction,
 } from "react";
-import {
-    LyricsMessageSchema,
-    MediaStateSchema,
-    type CommandMessage,
-    type CommandSymbol,
-    type MediaState,
-} from "./schemas";
 import Liricle from "liricle";
-import { Value } from "@sinclair/typebox/value";
+
+export interface MediaState {
+  title?: string;
+  artist?: string;
+  album?: string;
+  artworkUrl?: string | null;
+  playing?: boolean;
+  durationMicros?: number;
+  elapsedTimeMicros?: number;
+  timestampEpochMicros?: number;
+  playbackRate?: number;
+  prohibitsSkip?: boolean;
+  instrumental?: boolean;
+  lyrics?: string | null;
+}
+
+export type CommandSymbol = "<" | "_" | ">" | ">>" | "<<" | "|<<" | "|>>";
 
 type PlaybackOverride = {
     elapsedMicros: number;
     startedAtMs: number;
     playing: boolean;
     playbackRate: number;
-    trackKey: string;
+    title: string;
 };
 
 declare global {
@@ -40,100 +49,64 @@ function setLrcLyricsOverride(lyrics: string | null): void {
     window.dispatchEvent(new Event(LRC_OVERRIDE_EVENT));
 }
 
-function getSocketUrl(): string {
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    return `${protocol}//${location.host}/ws`;
-}
-
-function getTrackKey(mediaState: MediaState | null): string {
-    if (!mediaState?.title) {
-        return "";
-    }
-
-    return `${mediaState.title}::${mediaState.artist ?? ""}`;
-}
-
 function useMediaState() {
     const [mediaState, setMediaState] = useState<MediaState | null>(null);
-    const [lyricsByTrackKey, setLyricsByTrackKey] = useState<Map<string, string>>(
-        () => new Map(),
-    );
     const [isReady, setIsReady] = useState(false);
-
-    const socketRef = useRef<WebSocket | null>(null);
+    const portRef = useRef<any>(null);
 
     useEffect(() => {
-        const socket = new WebSocket(getSocketUrl());
-        socketRef.current = socket;
+        // Connect to background script
+        const port = browser.runtime.connect({ name: 'visualizer' });
+        portRef.current = port;
+        setIsReady(true);
 
-        socket.addEventListener("open", () => {
-            setIsReady(true);
-        });
-
-        socket.addEventListener("message", (event) => {
-            try {
-                const message = JSON.parse(String(event.data));
-
-                try {
-                    const lyricsMessage = Value.Parse(LyricsMessageSchema, message);
-                    setLyricsByTrackKey((prev) => {
-                        const next = new Map(prev);
-                        next.set(lyricsMessage.trackKey, lyricsMessage.lyrics);
-                        return next;
-                    });
-                    return;
-                } catch {
-                    // not a lyrics message
-                }
-
-                const nextState = Value.Parse(MediaStateSchema, message);
-                setMediaState(nextState);
-            } catch {
-                console.error("Invalid websocket message", event.data);
+        const handleMessage = (message: any) => {
+            if (message.type === 'STATE_UPDATE') {
+                const state = message.payload as MediaState;
+                setMediaState(state);
             }
-        });
+        };
 
-        socket.addEventListener("close", () => {
-            setIsReady(false);
-        });
+        port.onMessage.addListener(handleMessage);
 
-        socket.addEventListener("error", () => {
+        const handleDisconnect = () => {
             setIsReady(false);
-        });
+            portRef.current = null;
+        };
+        port.onDisconnect.addListener(handleDisconnect);
 
         return () => {
             setIsReady(false);
-            socket.close();
-            socketRef.current = null;
+            port.disconnect();
+            portRef.current = null;
         };
     }, []);
 
-    const sendMessage = useCallback((message: CommandMessage) => {
-        const socket = socketRef.current;
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
-            throw new Error("Socket disconnected");
+    const sendMessage = useCallback((message: any) => {
+        const port = portRef.current;
+        if (!port) {
+            console.error("Extension background port is disconnected");
+            return;
         }
-
-        socket.send(JSON.stringify(message));
+        port.postMessage(message);
     }, []);
 
     const sendCommand = useCallback(
         (command: CommandSymbol): void => {
-            sendMessage({ type: "command", command });
+            sendMessage({ type: "COMMAND", command });
         },
         [sendMessage],
     );
 
     const sendSeek = useCallback(
         (positionSeconds: number): void => {
-            sendMessage({ type: "seek", position: positionSeconds });
+            sendMessage({ type: "SEEK", position: positionSeconds });
         },
         [sendMessage],
     );
 
     return {
         isReady,
-        lyricsByTrackKey,
         mediaState,
         sendCommand,
         sendSeek,
@@ -141,8 +114,7 @@ function useMediaState() {
 }
 
 function useLyrics(
-    trackKey: string,
-    lyricsByTrackKey: Map<string, string>,
+    lyricsText: string | null,
     elapsedMicros: number,
 ) {
     const [overrideLyrics, setOverrideLyrics] = useState<string | null>(lrcLyricsOverride);
@@ -158,16 +130,16 @@ function useLyrics(
         };
     }, []);
 
-    const lyricsText = overrideLyrics ?? lyricsByTrackKey.get(trackKey) ?? null;
+    const activeLyrics = overrideLyrics ?? lyricsText;
 
-    const [liricle, setLiricle] = useState<Liricle | null>(null);
+    const [liricleInstance, setLiricleInstance] = useState<Liricle | null>(null);
     const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
 
     useEffect(() => {
-        if (lyricsText) {
+        if (activeLyrics) {
             const newLiricle = new Liricle();
             newLiricle.offset = 300;
-            newLiricle.load({ text: lyricsText });
+            newLiricle.load({ text: activeLyrics });
             newLiricle.on("sync", (e) => {
                 setFocusedIndex(e?.index ?? -1);
                 const focusedLine = document.getElementById(`line-${e?.index}`);
@@ -179,22 +151,22 @@ function useLyrics(
                     });
                 }
             });
-            setLiricle(newLiricle);
+            setLiricleInstance(newLiricle);
             setFocusedIndex(-1);
         } else {
-            setLiricle(null);
+            setLiricleInstance(null);
             setFocusedIndex(null);
         }
-    }, [lyricsText]);
+    }, [activeLyrics]);
 
     useEffect(() => {
-        if (liricle) {
-            liricle.sync(elapsedMicros / 1_000_000);
+        if (liricleInstance) {
+            liricleInstance.sync(elapsedMicros / 1_000_000);
         }
-    }, [elapsedMicros, liricle]);
+    }, [elapsedMicros, liricleInstance]);
 
     return {
-        lyrics: liricle?.data?.lines,
+        lyrics: liricleInstance?.data?.lines,
         focusedIndex,
     };
 }
@@ -233,7 +205,6 @@ function getOverrideElapsedMicros(override: PlaybackOverride | null): number {
 
 function usePlaybackClock(
     mediaState: MediaState | null,
-    trackKey: string,
     sendSeek: (positionSeconds: number) => void,
     setStatus: Dispatch<SetStateAction<string>>,
 ) {
@@ -266,13 +237,13 @@ function usePlaybackClock(
         const overrideElapsed = getOverrideElapsedMicros(playbackOverride);
 
         if (
-            !trackKey ||
-            trackKey !== playbackOverride.trackKey ||
+            !mediaState?.title ||
+            mediaState.title !== playbackOverride.title ||
             Math.abs(backendElapsed - overrideElapsed) < 1_750_000
         ) {
             setPlaybackOverride(null);
         }
-    }, [mediaState, playbackOverride, trackKey]);
+    }, [mediaState, playbackOverride]);
 
     const durationMicros = mediaState?.durationMicros ?? 0;
     const elapsedMicros =
@@ -310,7 +281,7 @@ function usePlaybackClock(
             playing: Boolean(mediaState?.playing),
             playbackRate:
                 mediaState?.playbackRate ?? (mediaState?.playing ? 1 : 0),
-            trackKey,
+            title: mediaState?.title ?? "",
         });
 
         try {
@@ -323,10 +294,10 @@ function usePlaybackClock(
         durationMicros,
         mediaState?.playing,
         mediaState?.playbackRate,
+        mediaState?.title,
         pendingSeekMicros,
         sendSeek,
         setStatus,
-        trackKey,
     ]);
 
     return {
@@ -348,25 +319,22 @@ if (typeof window !== "undefined") {
 }
 
 export function useSongState() {
-    const { isReady, lyricsByTrackKey, mediaState, sendCommand, sendSeek } =
+    const { isReady, mediaState, sendCommand, sendSeek } =
         useMediaState();
     const [status, setStatus] = useState("Connecting…");
 
-    const trackKey = useMemo(() => getTrackKey(mediaState), [mediaState]);
-    const imageUrl =
-        mediaState?.artworkData && mediaState.artworkMimeType
-            ? `data:${mediaState.artworkMimeType};base64,${mediaState.artworkData}`
-            : null;
+    const imageUrl = mediaState?.artworkUrl ?? null;
+
     const {
         durationMicros,
         elapsedMicros,
         handleSeekCommit,
         handleSeekInput,
         progressRatio,
-    } = usePlaybackClock(mediaState, trackKey, sendSeek, setStatus);
+    } = usePlaybackClock(mediaState, sendSeek, setStatus);
     const controlsBusy = !isReady;
 
-    const lyrics = useLyrics(trackKey, lyricsByTrackKey, elapsedMicros);
+    const lyrics = useLyrics(mediaState?.lyrics ?? null, elapsedMicros);
 
     useEffect(() => {
         if (!mediaState?.title) {
@@ -407,5 +375,3 @@ export function useSongState() {
         lyrics,
     };
 }
-
-export type { MediaState };

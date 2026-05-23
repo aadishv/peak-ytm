@@ -25,7 +25,7 @@
 
     function getTrackKey(metadata) {
         if (!metadata?.title) return "";
-        return `${metadata.title}::${metadata.artist ?? ""}::${metadata.album ?? ""}`;
+        return `${metadata.title}::${metadata.artist ?? ""}`;
     }
 
     function upgradeArtworkUrl(url) {

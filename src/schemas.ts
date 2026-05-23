@@ -67,9 +67,20 @@ export const ArtworkRelayRequestSchema = Type.Object({
   artworkType: Type.Optional(Type.String()),
 }, { additionalProperties: true });
 
+export const YtmLyricsRelayRequestSchema = Type.Object({
+  lrc: Type.String(),
+}, { additionalProperties: true });
+
+export const LyricsMessageSchema = Type.Object({
+  trackKey: Type.String(),
+  lyrics: Type.String(),
+}, { additionalProperties: true });
+
 export type MediaState = Static<typeof MediaStateSchema>;
 export type StreamDataMessage = Static<typeof StreamDataMessageSchema>;
 export type StreamMessage = Static<typeof StreamMessageSchema>;
 export type CommandSymbol = Static<typeof CommandSymbolSchema>;
 export type CommandMessage = Static<typeof CommandMessageSchema>;
 export type ArtworkRelayRequest = Static<typeof ArtworkRelayRequestSchema>;
+export type YtmLyricsRelayRequest = Static<typeof YtmLyricsRelayRequestSchema>;
+export type LyricsMessage = Static<typeof LyricsMessageSchema>;
