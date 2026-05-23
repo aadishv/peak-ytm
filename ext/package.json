@@ -12,7 +12,7 @@
     "zip": "wxt zip",
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
-    "native-host": "bun run ./native-host.ts",
+    "native-host": "node ./native-host.ts",
     "postinstall": "wxt prepare"
   },
   "dependencies": {
