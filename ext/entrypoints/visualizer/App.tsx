@@ -256,7 +256,18 @@ function App() {
                                         filter: `blur(${blur}px)`,
                                     }}
                                 >
-                                    {line.text}
+                                    {line.translatedText ? (
+                                        <div className="flex flex-col gap-1">
+                                            <span className="text-lg font-medium text-inherit opacity-75">
+                                                {line.text}
+                                            </span>
+                                            <span className="text-inherit">
+                                                {line.translatedText}
+                                            </span>
+                                        </div>
+                                    ) : (
+                                        <span className="text-inherit">{line.text}</span>
+                                    )}
                                 </div>
                             );
                         })}

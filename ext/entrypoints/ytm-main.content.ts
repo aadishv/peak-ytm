@@ -9,12 +9,23 @@ export default defineContentScript({
         const mediaSession = navigator.mediaSession;
         if (!NativeMediaMetadata || !mediaSession) return;
 
+        type LyricsTranslationLine = {
+            startTimeMs: number;
+            text: string;
+        };
+
+        type LyricsPayload = {
+            lrc: string;
+            translations: LyricsTranslationLine[];
+            translationLanguage: string | null;
+        };
+
         type MetadataPayload = {
             title: string;
             artist: string;
             album: string;
             artworkUrl: string | null;
-            lyrics: string | null;
+            lyrics: LyricsPayload | null;
         };
 
         type PlayerStatePayload = {
@@ -106,17 +117,44 @@ export default defineContentScript({
             return headers;
         }
 
-        function getMobileBrowseContext() {
+        function getMobileBrowseContext(targetLanguage?: string) {
             const context = (window as any).ytcfg?.get?.("INNERTUBE_CONTEXT");
             if (!context) throw new Error("Missing INNERTUBE_CONTEXT");
 
             const cloned = cloneValue(context);
             cloned.client.clientName = "ANDROID_MUSIC";
-            cloned.client.clientVersion = "7.21.50";
+            cloned.client.clientVersion = "9.24.51";
+            if (targetLanguage) {
+                cloned.client.hl = targetLanguage;
+            }
             return cloned;
         }
 
-        async function fetchTimedLyrics(browseId: string) {
+        function findNestedValue(value: unknown, key: string): unknown {
+            let result: unknown;
+
+            const visit = (current: unknown) => {
+                if (!current || typeof current !== "object" || result !== undefined) {
+                    return;
+                }
+
+                for (const [currentKey, currentValue] of Object.entries(current)) {
+                    if (currentKey === key) {
+                        result = currentValue;
+                        return;
+                    }
+                    visit(currentValue);
+                    if (result !== undefined) {
+                        return;
+                    }
+                }
+            };
+
+            visit(value);
+            return result;
+        }
+
+        async function browseMusic(body: Record<string, unknown>) {
             const apiKey = (window as any).ytcfg?.get?.("INNERTUBE_API_KEY");
             if (!apiKey) throw new Error("Missing INNERTUBE_API_KEY");
 
@@ -127,10 +165,7 @@ export default defineContentScript({
                     method: "POST",
                     credentials: "same-origin",
                     headers: getRequestHeaders(),
-                    body: JSON.stringify({
-                        context: getMobileBrowseContext(),
-                        browseId,
-                    }),
+                    body: JSON.stringify(body),
                 },
             );
 
@@ -138,12 +173,81 @@ export default defineContentScript({
                 throw new Error(`Lyrics fetch failed with ${response.status}`);
             }
 
-            const data = await response.json();
-            return (
+            return response.json();
+        }
+
+        async function fetchLyricsPayload(
+            browseId: string,
+            trackState: { title: string; artist: string; album: string },
+            targetLanguage = "en",
+        ): Promise<LyricsPayload | null> {
+            const data = await browseMusic({
+                context: getMobileBrowseContext(),
+                browseId,
+            });
+
+            const timedLyricsData =
                 data?.contents?.elementRenderer?.newElement?.type?.componentType
-                    ?.model?.timedLyricsModel?.lyricsData?.timedLyricsData ??
-                null
+                    ?.model?.timedLyricsModel?.lyricsData?.timedLyricsData;
+
+            (window as any).__ytmLyricsDebug = {
+                browseId,
+                source: data,
+                translation: null,
+            };
+
+            if (!Array.isArray(timedLyricsData) || timedLyricsData.length === 0) {
+                return null;
+            }
+
+            const translationTokenRaw = findNestedValue(
+                data,
+                "translationContinuationToken",
             );
+
+            let translations: LyricsTranslationLine[] = [];
+            if (typeof translationTokenRaw === "string" && translationTokenRaw) {
+                const translationData = await browseMusic({
+                    context: getMobileBrowseContext(targetLanguage),
+                    continuation: decodeURIComponent(translationTokenRaw),
+                });
+
+                (window as any).__ytmLyricsDebug.translation = translationData;
+                console.log("[YTM-Main] Raw lyrics debug", (window as any).__ytmLyricsDebug);
+
+                const translatedLines =
+                    translationData?.continuationContents?.musicLyricsContinuation
+                        ?.lyricsTranslations;
+
+                if (Array.isArray(translatedLines)) {
+                    translations = translatedLines.map((line: any, index: number) => ({
+                        startTimeMs: Number(
+                            timedLyricsData[index]?.cueRange
+                                ?.startTimeMilliseconds ?? 0,
+                        ),
+                        text:
+                            typeof line?.translatedLyricText === "string"
+                                ? line.translatedLyricText
+                                : "",
+                    }));
+                }
+            }
+
+            console.log("[YTM-Main] Extracted lyrics debug", {
+                originalCount: timedLyricsData.length,
+                translationCount: translations.length,
+                originalPreview: timedLyricsData.slice(0, 20).map((line: any) => ({
+                    startTimeMilliseconds: line?.cueRange?.startTimeMilliseconds,
+                    lyricLine: line?.lyricLine,
+                })),
+                translationPreview: translations.slice(0, 20),
+            });
+
+            return {
+                lrc: toLrc(trackState, timedLyricsData),
+                translations,
+                translationLanguage: translations.length > 0 ? targetLanguage : null,
+            };
         }
 
         function formatLrcTimestamp(milliseconds: number) {
@@ -369,26 +473,22 @@ export default defineContentScript({
 
             inFlightBrowseId = browseId;
             try {
-                const timedLyricsData = await fetchTimedLyrics(browseId);
-                if (
-                    Array.isArray(timedLyricsData) &&
-                    timedLyricsData.length > 0
-                ) {
-                    const lrcText = toLrc(
-                        { title, artist, album },
-                        timedLyricsData,
-                    );
-                    lastFetchedBrowseId = browseId;
+                const lyrics = await fetchLyricsPayload(browseId, {
+                    title,
+                    artist,
+                    album,
+                });
+                lastFetchedBrowseId = browseId;
+
+                if (lyrics) {
                     currentMetadata = {
                         title,
                         artist,
                         album,
                         artworkUrl,
-                        lyrics: lrcText,
+                        lyrics,
                     };
                     postMainMessage("METADATA_UPDATE", currentMetadata);
-                } else {
-                    lastFetchedBrowseId = browseId;
                 }
             } catch (error) {
                 console.error("[YTM-Main] Failed to fetch timed lyrics", error);

@@ -9,6 +9,17 @@ import {
 } from "react";
 import Liricle from "liricle";
 
+export type LyricsTranslationLine = {
+    startTimeMs: number;
+    text: string;
+};
+
+export type LyricsPayload = {
+    lrc: string;
+    translations: LyricsTranslationLine[];
+    translationLanguage: string | null;
+};
+
 export interface MediaState {
   title?: string;
   artist?: string;
@@ -21,7 +32,7 @@ export interface MediaState {
   playbackRate?: number;
   prohibitsSkip?: boolean;
   instrumental?: boolean;
-  lyrics?: string | null;
+  lyrics?: LyricsPayload | null;
 }
 
 export type CommandSymbol = "<" | "_" | ">" | ">>" | "<<" | "|<<" | "|>>";
@@ -113,8 +124,61 @@ function useMediaState() {
     };
 }
 
+type LiricleLine = {
+    index?: number;
+    time: number;
+    text: string;
+    words?: Array<{ index?: number; time: number; text: string }> | null;
+};
+
+type VisualizerLyricsLine = LiricleLine & {
+    translatedText: string | null;
+};
+
+function normalizeLyricText(text: string): string {
+    return text
+        .normalize("NFKC")
+        .replace(/[♪♫♬♩♭♯·•・,.;:!?()[\]{}"'`~\-_/\\|]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLocaleLowerCase();
+}
+
+function shouldConsumeTranslation(text: string): boolean {
+    const normalized = normalizeLyricText(text);
+
+    if (!normalized) {
+        return false;
+    }
+
+    return /[\p{L}\p{N}]/u.test(normalized);
+}
+
+function mapTranslationsToLines(
+    lines: LiricleLine[],
+    translations: LyricsTranslationLine[],
+): VisualizerLyricsLine[] {
+    let translationIndex = 0;
+
+    return lines.map((line) => {
+        const rawTranslatedText = shouldConsumeTranslation(line.text)
+            ? translations[translationIndex++]?.text ?? null
+            : null;
+        const translatedText =
+            rawTranslatedText &&
+            normalizeLyricText(rawTranslatedText) !== normalizeLyricText(line.text)
+                ? rawTranslatedText
+                : null;
+
+        return {
+            ...line,
+            translatedText,
+        };
+    });
+}
+
 function useLyrics(
-    lyricsText: string | null,
+    lyricsData: LyricsPayload | null,
     elapsedMicros: number,
 ) {
     const [overrideLyrics, setOverrideLyrics] = useState<string | null>(lrcLyricsOverride);
@@ -130,7 +194,7 @@ function useLyrics(
         };
     }, []);
 
-    const activeLyrics = overrideLyrics ?? lyricsText;
+    const activeLyrics = overrideLyrics ?? lyricsData?.lrc ?? null;
 
     const [liricleInstance, setLiricleInstance] = useState<Liricle | null>(null);
     const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
@@ -165,9 +229,19 @@ function useLyrics(
         }
     }, [elapsedMicros, liricleInstance]);
 
+    const lines = useMemo(
+        () =>
+            mapTranslationsToLines(
+                liricleInstance?.data?.lines ?? [],
+                lyricsData?.translations ?? [],
+            ),
+        [liricleInstance?.data?.lines, lyricsData?.translations],
+    );
+
     return {
-        lyrics: liricleInstance?.data?.lines,
+        lyrics: lines,
         focusedIndex,
+        translationLanguage: lyricsData?.translationLanguage ?? null,
     };
 }
 
@@ -335,6 +409,18 @@ export function useSongState() {
     const controlsBusy = !isReady;
 
     const lyrics = useLyrics(mediaState?.lyrics ?? null, elapsedMicros);
+
+    useEffect(() => {
+        if (!lyrics.lyrics.length) {
+            return;
+        }
+
+        console.log("[Visualizer] Lyrics with translations", lyrics.lyrics.map((line) => ({
+            time: line.time,
+            original: line.text,
+            translated: line.translatedText,
+        })));
+    }, [lyrics.lyrics]);
 
     useEffect(() => {
         if (!mediaState?.title) {

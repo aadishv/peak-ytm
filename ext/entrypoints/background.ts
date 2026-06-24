@@ -1,12 +1,23 @@
 export default defineBackground(() => {
   console.log('[Background] Service worker started');
 
+  type LyricsTranslationLine = {
+    startTimeMs: number;
+    text: string;
+  };
+
+  type LyricsPayload = {
+    lrc: string;
+    translations: LyricsTranslationLine[];
+    translationLanguage: string | null;
+  };
+
   type MediaState = {
     title?: string;
     artist?: string;
     album?: string;
     artworkUrl?: string | null;
-    lyrics?: string | null;
+    lyrics?: LyricsPayload | null;
     playing?: boolean;
     durationMicros?: number;
     elapsedTimeMicros?: number;
