@@ -132,7 +132,7 @@ function App() {
                     <img
                         src={imageUrl ?? undefined}
                         alt="Album artwork"
-                        className="size-full object-cover aspect-square mb-5 max-w-100 rounded-lg shadow-2xl"
+                        className="size-full object-cover aspect-square mb-5 max-w-100" // rounded-lg shadow-2xl
                     />
 
                     <h1 className="m-0 font-sans text-xl text-white font-bold">

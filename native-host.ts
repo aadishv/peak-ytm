@@ -1,10 +1,8 @@
-import { DiscordIPC, type Activity } from './rpc.ts';
 import { WebSocketServer, type WebSocket } from 'ws';
 
 type NativeHostMessage =
   | { type: 'INIT' }
-  | { type: 'PLAYER_STATE'; data?: unknown }
-  | { type: 'RECONNECT_RPC' };
+  | { type: 'PLAYER_STATE'; data?: unknown };
 
 type NativeHostEventMessage =
   | {
@@ -13,6 +11,8 @@ type NativeHostEventMessage =
       transport: 'websocket';
       host: string;
       port: number;
+      arrpcBridgeHost: string;
+      arrpcBridgePort: number;
     }
   | {
       type: 'RPC_STATUS_UPDATE';
@@ -20,7 +20,7 @@ type NativeHostEventMessage =
       user?: { username?: string; discriminator?: string };
     }
   | {
-      type: 'RPC_ERROR' | 'NATIVE_HOST_ERROR' | 'NATIVE_HOST_WARNING';
+      type: 'NATIVE_HOST_ERROR' | 'NATIVE_HOST_WARNING';
       message: string;
       errorType?: string;
       errorDetails?: Record<string, unknown>;
@@ -45,25 +45,54 @@ type NormalizedPlayerState = {
   raw: unknown;
 };
 
-const NATIVE_HOST_VERSION = '1.0.0';
+type ArRpcButton = { label: string; url: string };
+
+type ArRpcActivity = {
+  application_id: string;
+  name: string;
+  type: number;
+  details?: string;
+  state?: string;
+  timestamps?: { start?: number; end?: number };
+  assets?: {
+    large_image?: string;
+    large_text?: string;
+    small_image?: string;
+    small_text?: string;
+  };
+  metadata?: { button_urls?: string[] };
+  buttons?: ArRpcButton[];
+  flags: number;
+  instance?: boolean;
+};
+
+type ArRpcActivityMessage = {
+  activity: ArRpcActivity | null;
+  pid: number;
+  socketId: string;
+};
+
+const NATIVE_HOST_VERSION = '1.1.0';
 const clientId = '1242988484671705208';
-const WS_HOST = process.env.YTM_RPC_WS_HOST || '127.0.0.1';
-const WS_PORT = Number(process.env.YTM_RPC_WS_PORT || 32145);
+const CONTROL_WS_HOST = process.env.YTM_RPC_WS_HOST || '127.0.0.1';
+const CONTROL_WS_PORT = Number(process.env.YTM_RPC_WS_PORT || 32145);
+const ARRPC_WS_HOST = process.env.YTM_ARRPC_WS_HOST || '127.0.0.1';
+const ARRPC_WS_PORT = Number(process.env.YTM_ARRPC_WS_PORT || 1337);
 const EXT_POLL_INTERVAL_MS = 1_500;
 const STALE_ACTIVITY_TIMEOUT_MS = EXT_POLL_INTERVAL_MS + 500;
+const ARRPC_SOCKET_ID = '0';
 
-let messageQueue: NativeHostMessage[] = [];
-let rpcReady = false;
-let rpcLoginPromise: Promise<void> | null = null;
 let messageProcessingPromise: Promise<void> = Promise.resolve();
 let staleActivityTimer: ReturnType<typeof setTimeout> | null = null;
 let lastActivitySignature: string | null = null;
 let lastActivityStartTimestamp: number | null = null;
 let lastActivityEndTimestamp: number | null = null;
-const clients = new Set<WebSocket>();
+let currentActivity: ArRpcActivityMessage | null = null;
+const controlClients = new Set<WebSocket>();
+const arrpcClients = new Set<WebSocket>();
 
-let rpc = createRpc();
-const wss = new WebSocketServer({ host: WS_HOST, port: WS_PORT });
+const controlWss = new WebSocketServer({ host: CONTROL_WS_HOST, port: CONTROL_WS_PORT });
+const arrpcWss = new WebSocketServer({ host: ARRPC_WS_HOST, port: ARRPC_WS_PORT });
 
 function sendToExtension(
   messageObject: NativeHostEventMessage,
@@ -71,7 +100,7 @@ function sendToExtension(
 ) {
   try {
     const jsonMessage = JSON.stringify(messageObject);
-    const recipients = targetClient ? [targetClient] : [...clients];
+    const recipients = targetClient ? [targetClient] : [...controlClients];
 
     for (const client of recipients) {
       if (client.readyState === client.OPEN) {
@@ -88,6 +117,16 @@ function logExtensionEvent(label: string, payload: unknown) {
     console.log(`[extension] ${label}: ${JSON.stringify(payload)}`);
   } catch {
     console.log(`[extension] ${label}`);
+  }
+}
+
+function sendToArRpcClients(message: ArRpcActivityMessage) {
+  const jsonMessage = JSON.stringify(message);
+
+  for (const client of arrpcClients) {
+    if (client.readyState === client.OPEN) {
+      client.send(jsonMessage);
+    }
   }
 }
 
@@ -108,98 +147,40 @@ function armStaleActivityTimer() {
   }, STALE_ACTIVITY_TIMEOUT_MS);
 }
 
-function createRpc() {
-  const nextRpc = new DiscordIPC(clientId);
-
-  nextRpc.on('ready', () => {
-    if (rpc !== nextRpc) return;
-
-    rpcReady = true;
-    sendToExtension({
-      type: 'RPC_STATUS_UPDATE',
-      status: 'connected',
-      user: {
-        username: nextRpc.user?.username,
-        discriminator: nextRpc.user?.discriminator,
-      },
-    });
-
-    const queue = messageQueue.filter((msg) => msg.type === 'PLAYER_STATE');
-    messageQueue = [];
-
-    for (const msg of queue) {
-      void setPlayerState(msg.data);
-    }
-  });
-
-  nextRpc.on('error', (err: Error) => {
-    if (rpc !== nextRpc) return;
-
-    rpcReady = false;
-    sendToExtension({ type: 'RPC_ERROR', message: `RPC Error: ${err.message}` });
-  });
-
-  nextRpc.on('close', () => {
-    if (rpc !== nextRpc) return;
-
-    rpcReady = false;
-    sendToExtension({ type: 'RPC_STATUS_UPDATE', status: 'disconnected' });
-  });
-
-  return nextRpc;
-}
-
 function sendCurrentStatus(targetClient?: WebSocket) {
   sendToExtension(
     {
       type: 'NATIVE_HOST_STARTED',
       version: NATIVE_HOST_VERSION,
       transport: 'websocket',
-      host: WS_HOST,
-      port: WS_PORT,
+      host: CONTROL_WS_HOST,
+      port: CONTROL_WS_PORT,
+      arrpcBridgeHost: ARRPC_WS_HOST,
+      arrpcBridgePort: ARRPC_WS_PORT,
     },
     targetClient,
   );
 
-  if (rpcReady && rpc.user) {
-    sendToExtension(
-      {
-        type: 'RPC_STATUS_UPDATE',
-        status: 'connected',
-        user: {
-          username: rpc.user.username,
-          discriminator: rpc.user.discriminator,
-        },
-      },
-      targetClient,
-    );
-    return;
-  }
-
   sendToExtension(
-    { type: 'RPC_STATUS_UPDATE', status: 'disconnected' },
+    {
+      type: 'RPC_STATUS_UPDATE',
+      status: 'connected',
+      user: {
+        username: 'arRPC',
+        discriminator: 'bridge',
+      },
+    },
     targetClient,
   );
 }
 
 async function handleMessage(message: NativeHostMessage) {
-  if (!rpcReady && message.type !== 'INIT') {
-    messageQueue.push(message);
-    logExtensionEvent('queued', message);
-    await connectRpc();
-    return;
-  }
-
   switch (message.type) {
     case 'INIT':
-      await connectRpc();
       break;
     case 'PLAYER_STATE':
       armStaleActivityTimer();
       await setPlayerState(message.data);
-      break;
-    case 'RECONNECT_RPC':
-      await connectRpc(true);
       break;
     default:
       sendToExtension({
@@ -209,9 +190,9 @@ async function handleMessage(message: NativeHostMessage) {
   }
 }
 
-wss.on('connection', (socket) => {
-  clients.add(socket);
-  logExtensionEvent('connected', { clients: clients.size });
+controlWss.on('connection', (socket) => {
+  controlClients.add(socket);
+  logExtensionEvent('connected', { clients: controlClients.size });
   sendCurrentStatus(socket);
 
   socket.on('message', (rawMessage) => {
@@ -244,8 +225,8 @@ wss.on('connection', (socket) => {
   });
 
   socket.on('close', () => {
-    clients.delete(socket);
-    logExtensionEvent('disconnected', { clients: clients.size });
+    controlClients.delete(socket);
+    logExtensionEvent('disconnected', { clients: controlClients.size });
   });
 
   socket.on('error', (error) => {
@@ -257,69 +238,41 @@ wss.on('connection', (socket) => {
   });
 });
 
-wss.on('listening', () => {
+arrpcWss.on('connection', (socket) => {
+  arrpcClients.add(socket);
+
+  if (currentActivity && socket.readyState === socket.OPEN) {
+    socket.send(JSON.stringify(currentActivity));
+  }
+
+  socket.on('close', () => {
+    arrpcClients.delete(socket);
+  });
+
+  socket.on('error', (error) => {
+    console.error('arRPC bridge socket error:', error);
+  });
+});
+
+controlWss.on('listening', () => {
   sendToExtension({
     type: 'NATIVE_HOST_STARTED',
     version: NATIVE_HOST_VERSION,
     transport: 'websocket',
-    host: WS_HOST,
-    port: WS_PORT,
+    host: CONTROL_WS_HOST,
+    port: CONTROL_WS_PORT,
+    arrpcBridgeHost: ARRPC_WS_HOST,
+    arrpcBridgePort: ARRPC_WS_PORT,
   });
 });
 
-wss.on('error', (error) => {
-  console.error('WebSocket server error:', error);
+controlWss.on('error', (error) => {
+  console.error('Control WebSocket server error:', error);
 });
 
-async function connectRpc(forceReconnect = false) {
-  if (rpcReady && !forceReconnect) return;
-  if (rpcLoginPromise) return rpcLoginPromise;
-
-  rpcLoginPromise = (async () => {
-    try {
-      if (forceReconnect) {
-        rpcReady = false;
-        rpc.close();
-        rpc = createRpc();
-      }
-
-      await rpc.connect();
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      let errorType = 'UNKNOWN_ERROR';
-      let errorMessage = error.message;
-
-      if (/timeout|TIMED_OUT|ETIMEDOUT|RPC_CONNECTION_TIMEOUT/i.test(error.message)) {
-        errorType = 'TIMEOUT_ERROR';
-        errorMessage = 'Connection timed out while waiting for Discord RPC';
-      } else if (/401|Unauthorized|AUTHENTICATION_FAILED/i.test(error.message)) {
-        errorType = 'AUTHENTICATION_ERROR';
-        errorMessage = 'Authentication failed - check client ID and Discord credentials';
-      }
-
-      console.error(`RPC Login Failed [${errorType}]:`, {
-        errorType,
-        errorMessage: error.message,
-        stack: error.stack,
-        clientId,
-      });
-
-      sendToExtension({
-        type: 'RPC_ERROR',
-        message: `RPC Login Failed: ${errorMessage}`,
-        errorType,
-        errorDetails: {
-          originalMessage: error.message,
-          stack: error.stack,
-        },
-      });
-    } finally {
-      rpcLoginPromise = null;
-    }
-  })();
-
-  return rpcLoginPromise;
-}
+arrpcWss.on('error', (error) => {
+  console.error('arRPC bridge WebSocket server error:', error);
+});
 
 function getFirstString(...values: unknown[]) {
   return values.find(
@@ -374,18 +327,29 @@ function normalizePlayerState(playerState: unknown): NormalizedPlayerState | nul
   };
 }
 
-function buildDiscordActivity(playerState: unknown): Activity | null {
+function buildArRpcActivity(playerState: unknown): ArRpcActivity | null {
   const normalized = normalizePlayerState(playerState);
   if (!normalized || !normalized.title || normalized.playbackState === 'paused') {
     return null;
   }
 
-  const activity: Activity = {
+  const buttons: ArRpcButton[] | undefined = normalized.trackUrl
+    ? [{ label: 'Open in YouTube Music', url: normalized.trackUrl }]
+    : undefined;
+
+  const activity: ArRpcActivity = {
+    application_id: clientId,
+    name: 'YouTube Music',
+    type: 2,
     details: normalized.title,
     state: normalized.artist || undefined,
-    largeImageKey: normalized.artworkUrl,
-    largeImageText: normalized.album || '',
-    type: 2,
+    assets: {
+      large_image: normalized.artworkUrl,
+      large_text: normalized.album || '',
+    },
+    metadata: buttons ? { button_urls: buttons.map((button) => button.url) } : undefined,
+    buttons,
+    flags: 0,
   };
 
   if (
@@ -397,27 +361,29 @@ function buildDiscordActivity(playerState: unknown): Activity | null {
     const startedAtMs = measuredAtMs - normalized.positionMs;
     const endsAtMs = startedAtMs + normalized.durationMs;
 
-    activity.startTimestamp = Math.floor(startedAtMs / 1000);
-    activity.endTimestamp = Math.floor(endsAtMs / 1000);
+    activity.timestamps = {
+      start: startedAtMs,
+      end: endsAtMs,
+    };
   }
 
   return activity;
 }
 
-function getActivitySignature(activity: Activity): string {
+function getActivitySignature(activity: ArRpcActivity): string {
   return JSON.stringify({
+    name: activity.name,
     type: activity.type,
     details: activity.details,
     state: activity.state,
-    largeImageKey: activity.largeImageKey,
-    largeImageText: activity.largeImageText,
-    smallImageKey: activity.smallImageKey,
-    smallImageText: activity.smallImageText,
+    assets: activity.assets,
+    metadata: activity.metadata,
     buttons: activity.buttons,
+    flags: activity.flags,
   });
 }
 
-function shouldSendActivityUpdate(activity: Activity): boolean {
+function shouldSendActivityUpdate(activity: ArRpcActivity): boolean {
   const signature = getActivitySignature(activity);
   const sameSignature = signature === lastActivitySignature;
 
@@ -425,9 +391,12 @@ function shouldSendActivityUpdate(activity: Activity): boolean {
     return true;
   }
 
+  const startTimestamp = activity.timestamps?.start;
+  const endTimestamp = activity.timestamps?.end;
+
   if (
-    activity.startTimestamp == null ||
-    activity.endTimestamp == null ||
+    startTimestamp == null ||
+    endTimestamp == null ||
     lastActivityStartTimestamp == null ||
     lastActivityEndTimestamp == null
   ) {
@@ -435,15 +404,15 @@ function shouldSendActivityUpdate(activity: Activity): boolean {
   }
 
   return (
-    Math.abs(activity.startTimestamp - lastActivityStartTimestamp) > 1 ||
-    Math.abs(activity.endTimestamp - lastActivityEndTimestamp) > 1
+    Math.abs(startTimestamp - lastActivityStartTimestamp) > 1_000 ||
+    Math.abs(endTimestamp - lastActivityEndTimestamp) > 1_000
   );
 }
 
-function rememberActivity(activity: Activity): void {
+function rememberActivity(activity: ArRpcActivity): void {
   lastActivitySignature = getActivitySignature(activity);
-  lastActivityStartTimestamp = activity.startTimestamp ?? null;
-  lastActivityEndTimestamp = activity.endTimestamp ?? null;
+  lastActivityStartTimestamp = activity.timestamps?.start ?? null;
+  lastActivityEndTimestamp = activity.timestamps?.end ?? null;
 }
 
 function forgetActivity(): void {
@@ -453,7 +422,7 @@ function forgetActivity(): void {
 }
 
 async function setPlayerState(playerState: unknown) {
-  const activity = buildDiscordActivity(playerState);
+  const activity = buildArRpcActivity(playerState);
 
   if (!activity) {
     clearStaleActivityTimer();
@@ -470,26 +439,22 @@ async function setPlayerState(playerState: unknown) {
   }
 
   logExtensionEvent('setting_activity', activity);
-  await setDiscordActivity(activity);
+  await setArRpcActivity(activity);
 }
 
-async function setDiscordActivity(activityData: Activity) {
-  if (!rpcReady) {
-    sendToExtension({
-      type: 'ACTIVITY_STATUS',
-      status: 'error',
-      message: 'RPC client not ready.',
-    });
-    return;
-  }
-
+async function setArRpcActivity(activityData: ArRpcActivity) {
   try {
-    rpc.setActivity(activityData);
+    currentActivity = {
+      activity: activityData,
+      pid: process.pid,
+      socketId: ARRPC_SOCKET_ID,
+    };
     rememberActivity(activityData);
+    sendToArRpcClients(currentActivity);
     sendToExtension({
       type: 'ACTIVITY_STATUS',
       status: 'success',
-      activity: activityData,
+      activity: currentActivity,
     });
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
@@ -502,18 +467,14 @@ async function setDiscordActivity(activityData: Activity) {
 }
 
 async function clearActivity() {
-  if (!rpcReady) {
-    sendToExtension({
-      type: 'ACTIVITY_STATUS',
-      status: 'clear_error',
-      message: 'RPC client not ready.',
-    });
-    return;
-  }
-
   try {
-    rpc.clearActivity();
+    currentActivity = {
+      activity: null,
+      pid: process.pid,
+      socketId: ARRPC_SOCKET_ID,
+    };
     forgetActivity();
+    sendToArRpcClients(currentActivity);
     logExtensionEvent('activity_cleared', {});
     sendToExtension({ type: 'ACTIVITY_STATUS', status: 'cleared' });
   } catch (err) {
@@ -526,8 +487,8 @@ async function clearActivity() {
   }
 }
 
-function shutdownRpcAndExit(exitCode = 0) {
-  for (const client of clients) {
+function shutdownAndExit(exitCode = 0) {
+  for (const client of controlClients) {
     try {
       client.close();
     } catch {
@@ -535,20 +496,25 @@ function shutdownRpcAndExit(exitCode = 0) {
     }
   }
 
-  wss.close();
+  for (const client of arrpcClients) {
+    try {
+      client.close();
+    } catch {
+      // noop
+    }
+  }
 
-  rpc.close();
+  controlWss.close();
+  arrpcWss.close();
   process.exit(exitCode);
 }
 
-void connectRpc();
-
 process.on('SIGINT', () => {
   clearStaleActivityTimer();
-  shutdownRpcAndExit(0);
+  shutdownAndExit(0);
 });
 
 process.on('SIGTERM', () => {
   clearStaleActivityTimer();
-  shutdownRpcAndExit(0);
+  shutdownAndExit(0);
 });
