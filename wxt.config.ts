@@ -10,8 +10,7 @@ export default defineConfig({
   manifest: {
     name: 'peak ytm',
     description: 'makes ytm more peak',
-    version: '1.0.0',
-    permissions: ['tabs', 'activeTab'],
+    version: '0.1.0',
     host_permissions: ['ws://127.0.0.1:32145/*'],
     action: {},
   },

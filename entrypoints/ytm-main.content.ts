@@ -1,24 +1,17 @@
+import type {
+    LyricsPayload,
+    LyricsTranslationLine,
+    PlayerSnapshot,
+} from "../shared/protocol";
+
 export default defineContentScript({
     matches: ["*://music.youtube.com/*"],
     world: "MAIN",
     runAt: "document_start",
     main() {
-        console.log("[YTM-Main] Installed MediaMetadata interceptor");
-
         const NativeMediaMetadata = window.MediaMetadata;
         const mediaSession = navigator.mediaSession;
         if (!NativeMediaMetadata || !mediaSession) return;
-
-        type LyricsTranslationLine = {
-            startTimeMs: number;
-            text: string;
-        };
-
-        type LyricsPayload = {
-            lrc: string;
-            translations: LyricsTranslationLine[];
-            translationLanguage: string | null;
-        };
 
         type MetadataPayload = {
             title: string;
@@ -41,6 +34,7 @@ export default defineContentScript({
         let inFlightBrowseId = "";
         let lastObservedMetadata: MediaMetadata | null = null;
         let currentMetadata: MetadataPayload | null = null;
+        let currentPlayerState: PlayerStatePayload | null = null;
         let lastPlayerStateKey = "";
         let videoElement: HTMLVideoElement | null = null;
         let playerBarElement: Element | null = null;
@@ -53,6 +47,16 @@ export default defineContentScript({
         function cloneValue<T>(value: T): T {
             if (typeof structuredClone === "function") return structuredClone(value);
             return JSON.parse(JSON.stringify(value));
+        }
+
+        function emitSnapshot() {
+            if (!currentMetadata || !currentPlayerState) return;
+
+            const snapshot: PlayerSnapshot = {
+                ...currentMetadata,
+                ...currentPlayerState,
+            };
+            postMainMessage("PLAYER_SNAPSHOT", snapshot);
         }
 
         function getHighestResolutionArtwork(
@@ -213,7 +217,6 @@ export default defineContentScript({
                 });
 
                 (window as any).__ytmLyricsDebug.translation = translationData;
-                console.log("[YTM-Main] Raw lyrics debug", (window as any).__ytmLyricsDebug);
 
                 const translatedLines =
                     translationData?.continuationContents?.musicLyricsContinuation
@@ -232,16 +235,6 @@ export default defineContentScript({
                     }));
                 }
             }
-
-            console.log("[YTM-Main] Extracted lyrics debug", {
-                originalCount: timedLyricsData.length,
-                translationCount: translations.length,
-                originalPreview: timedLyricsData.slice(0, 20).map((line: any) => ({
-                    startTimeMilliseconds: line?.cueRange?.startTimeMilliseconds,
-                    lyricLine: line?.lyricLine,
-                })),
-                translationPreview: translations.slice(0, 20),
-            });
 
             return {
                 lrc: toLrc(trackState, timedLyricsData),
@@ -355,7 +348,8 @@ export default defineContentScript({
 
             if (!force && nextKey === lastPlayerStateKey) return;
             lastPlayerStateKey = nextKey;
-            postMainMessage("PLAYER_STATE_UPDATE", payload);
+            currentPlayerState = payload;
+            emitSnapshot();
         }
 
         function setupVideoListeners(video: HTMLVideoElement) {
@@ -457,7 +451,6 @@ export default defineContentScript({
                     artworkUrl,
                     lyrics: null,
                 };
-                postMainMessage("METADATA_UPDATE", currentMetadata);
                 emitPlayerState(true);
             }
 
@@ -478,8 +471,9 @@ export default defineContentScript({
                     artist,
                     album,
                 });
-                lastFetchedBrowseId = browseId;
+                if (lastSentMetadataKey !== metadataKey) return;
 
+                lastFetchedBrowseId = browseId;
                 if (lyrics) {
                     currentMetadata = {
                         title,
@@ -488,7 +482,7 @@ export default defineContentScript({
                         artworkUrl,
                         lyrics,
                     };
-                    postMainMessage("METADATA_UPDATE", currentMetadata);
+                    emitSnapshot();
                 }
             } catch (error) {
                 console.error("[YTM-Main] Failed to fetch timed lyrics", error);
@@ -600,6 +594,7 @@ export default defineContentScript({
         setInterval(() => {
             const metadata = navigator.mediaSession.metadata ?? lastObservedMetadata;
             if (metadata) void checkAndUpdate(metadata);
+            emitPlayerState(true);
         }, 1500);
     },
 });

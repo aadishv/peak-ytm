@@ -192,10 +192,7 @@ function App() {
                             <button
                                 className="size-14 flex-1 cursor-pointer disabled:opacity-50"
                                 aria-label="Previous track"
-                                disabled={
-                                    controlsBusy ||
-                                    Boolean(mediaState?.prohibitsSkip)
-                                }
+                                disabled={controlsBusy}
                                 onClick={() => {
                                     void handleCommand("<");
                                 }}
@@ -217,10 +214,7 @@ function App() {
                             <button
                                 className="size-14 flex-1 cursor-pointer disabled:opacity-50"
                                 aria-label="Next track"
-                                disabled={
-                                    controlsBusy ||
-                                    Boolean(mediaState?.prohibitsSkip)
-                                }
+                                disabled={controlsBusy}
                                 onClick={() => {
                                     void handleCommand(">");
                                 }}

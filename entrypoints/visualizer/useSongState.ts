@@ -8,34 +8,14 @@ import {
     type SetStateAction,
 } from "react";
 import Liricle from "liricle";
-
-export type LyricsTranslationLine = {
-    startTimeMs: number;
-    text: string;
-};
-
-export type LyricsPayload = {
-    lrc: string;
-    translations: LyricsTranslationLine[];
-    translationLanguage: string | null;
-};
-
-export interface MediaState {
-  title?: string;
-  artist?: string;
-  album?: string;
-  artworkUrl?: string | null;
-  playing?: boolean;
-  durationMicros?: number;
-  elapsedTimeMicros?: number;
-  timestampEpochMicros?: number;
-  playbackRate?: number;
-  prohibitsSkip?: boolean;
-  instrumental?: boolean;
-  lyrics?: LyricsPayload | null;
-}
-
-export type CommandSymbol = "<" | "_" | ">" | ">>" | "<<" | "|<<" | "|>>";
+import {
+    isServerMessage,
+    type ClientMessage,
+    type CommandSymbol,
+    type LyricsPayload,
+    type LyricsTranslationLine,
+    type PlayerSnapshot,
+} from "../../shared/protocol";
 
 type PlaybackOverride = {
     elapsedMicros: number;
@@ -61,45 +41,85 @@ function setLrcLyricsOverride(lyrics: string | null): void {
 }
 
 function useMediaState() {
-    const [mediaState, setMediaState] = useState<MediaState | null>(null);
+    const [mediaState, setMediaState] = useState<PlayerSnapshot | null>(null);
     const [isReady, setIsReady] = useState(false);
-    const portRef = useRef<any>(null);
+    const socketRef = useRef<WebSocket | null>(null);
+    const clientIdRef = useRef(
+        typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `visualizer-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
 
     useEffect(() => {
-        // Connect to background script
-        const port = browser.runtime.connect({ name: 'visualizer' });
-        portRef.current = port;
-        setIsReady(true);
+        const managerUrl = "ws://127.0.0.1:32145";
+        const reconnectDelayMs = 2_000;
+        let disposed = false;
+        let reconnectTimer: number | null = null;
 
-        const handleMessage = (message: any) => {
-            if (message.type === 'STATE_UPDATE') {
-                const state = message.payload as MediaState;
-                setMediaState(state);
-            }
+        const connect = () => {
+            if (disposed) return;
+
+            const socket = new WebSocket(managerUrl);
+            socketRef.current = socket;
+
+            socket.addEventListener("open", () => {
+                if (disposed) {
+                    socket.close();
+                    return;
+                }
+                setIsReady(true);
+                const hello: ClientMessage = {
+                    type: "HELLO",
+                    role: "visualizer",
+                    clientId: clientIdRef.current,
+                };
+                socket.send(JSON.stringify(hello));
+            });
+
+            socket.addEventListener("message", (event) => {
+                let message: unknown;
+                try {
+                    message = JSON.parse(String(event.data));
+                } catch {
+                    return;
+                }
+                if (!isServerMessage(message)) return;
+
+                if (message.type === "STATE_UPDATE") {
+                    setMediaState(message.payload);
+                } else if (message.type === "ERROR") {
+                    console.warn(`Native manager: ${message.message}`);
+                }
+            });
+
+            socket.addEventListener("close", () => {
+                if (socketRef.current === socket) socketRef.current = null;
+                if (disposed) return;
+
+                setIsReady(false);
+                setMediaState(null);
+                reconnectTimer = window.setTimeout(connect, reconnectDelayMs);
+            });
+
+            socket.addEventListener("error", () => socket.close());
         };
 
-        port.onMessage.addListener(handleMessage);
-
-        const handleDisconnect = () => {
-            setIsReady(false);
-            portRef.current = null;
-        };
-        port.onDisconnect.addListener(handleDisconnect);
+        connect();
 
         return () => {
-            setIsReady(false);
-            port.disconnect();
-            portRef.current = null;
+            disposed = true;
+            if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+            socketRef.current?.close();
+            socketRef.current = null;
         };
     }, []);
 
-    const sendMessage = useCallback((message: any) => {
-        const port = portRef.current;
-        if (!port) {
-            console.error("Extension background port is disconnected");
-            return;
+    const sendMessage = useCallback((message: ClientMessage) => {
+        const socket = socketRef.current;
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+            throw new Error("Native manager is disconnected");
         }
-        port.postMessage(message);
+        socket.send(JSON.stringify(message));
     }, []);
 
     const sendCommand = useCallback(
@@ -245,7 +265,7 @@ function useLyrics(
     };
 }
 
-function getBackendElapsedMicros(mediaState: MediaState | null): number {
+function getBackendElapsedMicros(mediaState: PlayerSnapshot | null): number {
     if (!mediaState) {
         return 0;
     }
@@ -278,7 +298,7 @@ function getOverrideElapsedMicros(override: PlaybackOverride | null): number {
 }
 
 function usePlaybackClock(
-    mediaState: MediaState | null,
+    mediaState: PlayerSnapshot | null,
     sendSeek: (positionSeconds: number) => void,
     setStatus: Dispatch<SetStateAction<string>>,
 ) {
@@ -409,18 +429,6 @@ export function useSongState() {
     const controlsBusy = !isReady;
 
     const lyrics = useLyrics(mediaState?.lyrics ?? null, elapsedMicros);
-
-    useEffect(() => {
-        if (!lyrics.lyrics.length) {
-            return;
-        }
-
-        console.log("[Visualizer] Lyrics with translations", lyrics.lyrics.map((line) => ({
-            time: line.time,
-            original: line.text,
-            translated: line.translatedText,
-        })));
-    }, [lyrics.lyrics]);
 
     useEffect(() => {
         if (!mediaState?.title) {
