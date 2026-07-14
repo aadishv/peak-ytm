@@ -62,13 +62,6 @@ type LastFmConfig = {
     sessionKey: string;
 };
 
-type LastFmTrackLifecycle = {
-    key: string;
-    startedAtSeconds: number;
-    nowPlayingSubmitted: boolean;
-    scrobbled: boolean;
-};
-
 type LastFmAuthResponse = {
     token?: string;
     session?: { key?: string; name?: string };
@@ -214,55 +207,188 @@ async function authorizeLastFm(): Promise<void> {
 }
 
 class LastFmClient {
-    private lifecycle: LastFmTrackLifecycle | null = null;
+    private title: string | null = null;
+    private artist: string | null = null;
+    private album: string | null = null;
+    private startedAtSeconds = 0;
+    private scrobbled = false;
+    private scrobbleTimer: ReturnType<typeof setTimeout> | null = null;
+    private activeTimerId: number | null = null;
+    private timerSequence = 0;
     private readonly config: LastFmConfig;
 
     constructor(config: LastFmConfig) {
         this.config = config;
     }
 
-    clear(): void {
-        this.lifecycle = null;
+    pause(reason = "player state cleared"): void {
+        this.log("pause", { reason });
+        this.cancelScrobbleTimer(reason);
     }
 
     update(snapshot: PlayerSnapshot): void {
-        const key = JSON.stringify([snapshot.title, snapshot.artist, snapshot.album]);
-        if (!this.lifecycle || this.lifecycle.key !== key) {
-            this.lifecycle = {
-                key,
-                startedAtSeconds: Math.floor(
-                    (snapshot.timestampEpochMicros - snapshot.elapsedTimeMicros) / 1_000_000,
-                ),
-                nowPlayingSubmitted: false,
-                scrobbled: false,
-            };
+        const elapsedSeconds = snapshot.elapsedTimeMicros / 1_000_000;
+        const durationSeconds = snapshot.durationMicros / 1_000_000;
+        this.log("state-update", {
+            incoming: {
+                title: snapshot.title,
+                artist: snapshot.artist,
+                album: snapshot.album,
+                playing: snapshot.playing,
+                elapsedSeconds,
+                durationSeconds,
+                timestampEpochSeconds: snapshot.timestampEpochMicros / 1_000_000,
+                inferredStartedAtSeconds:
+                    (snapshot.timestampEpochMicros - snapshot.elapsedTimeMicros) /
+                    1_000_000,
+            },
+            current: {
+                title: this.title,
+                artist: this.artist,
+                album: this.album,
+                startedAtSeconds: this.startedAtSeconds,
+                scrobbled: this.scrobbled,
+                activeTimerId: this.activeTimerId,
+            },
+        });
+
+        if (!snapshot.playing || !snapshot.title || !snapshot.artist) {
+            this.pause("snapshot is paused or missing title/artist");
+            return;
         }
 
-        if (!snapshot.playing || !snapshot.title || !snapshot.artist) return;
+        const trackChanged =
+            snapshot.title !== this.title ||
+            snapshot.artist !== this.artist ||
+            snapshot.album !== this.album;
 
-        if (!this.lifecycle.nowPlayingSubmitted) {
-            this.lifecycle.nowPlayingSubmitted = true;
+        if (trackChanged) {
+            const previousTrack = {
+                title: this.title,
+                artist: this.artist,
+                album: this.album,
+                startedAtSeconds: this.startedAtSeconds,
+                scrobbled: this.scrobbled,
+            };
+            this.cancelScrobbleTimer("track metadata changed");
+            this.title = snapshot.title;
+            this.artist = snapshot.artist;
+            this.album = snapshot.album;
+            this.startedAtSeconds = Math.floor(
+                (snapshot.timestampEpochMicros - snapshot.elapsedTimeMicros) / 1_000_000,
+            );
+            this.scrobbled = false;
+
+            this.log("track-changed", {
+                previous: previousTrack,
+                current: {
+                    title: this.title,
+                    artist: this.artist,
+                    album: this.album,
+                    startedAtSeconds: this.startedAtSeconds,
+                },
+            });
             void this.submit("track.updateNowPlaying", snapshot).catch((error) => {
-                console.error("Last.fm now-playing request failed:", error);
+                this.log("now-playing-failed", { error: String(error) });
             });
         }
 
-        const durationSeconds = snapshot.durationMicros / 1_000_000;
-        const elapsedSeconds = snapshot.elapsedTimeMicros / 1_000_000;
-        const scrobbleAtSeconds = Math.min(durationSeconds / 2, 240);
+        if (!this.scrobbled && !this.scrobbleTimer) {
+            this.scheduleScrobble(snapshot);
+        }
+    }
 
-        if (
-            !this.lifecycle.scrobbled &&
-            durationSeconds > 30 &&
-            elapsedSeconds >= scrobbleAtSeconds
-        ) {
-            this.lifecycle.scrobbled = true;
-            void this.submit("track.scrobble", snapshot, this.lifecycle.startedAtSeconds).catch(
+    private scheduleScrobble(snapshot: PlayerSnapshot): void {
+        const durationSeconds = snapshot.durationMicros / 1_000_000;
+        if (durationSeconds <= 30) {
+            this.log("timer-not-scheduled", {
+                reason: "duration is not longer than 30 seconds",
+                durationSeconds,
+            });
+            return;
+        }
+
+        const elapsedSeconds = snapshot.elapsedTimeMicros / 1_000_000;
+        const thresholdSeconds = Math.min(durationSeconds / 2, 240);
+        const remainingSeconds = Math.max(0, thresholdSeconds - elapsedSeconds);
+        const title = this.title;
+        const artist = this.artist;
+        const album = this.album;
+        const timerId = ++this.timerSequence;
+
+        const timer = setTimeout(() => {
+            const stillCurrent =
+                this.scrobbleTimer === timer &&
+                !this.scrobbled &&
+                this.title === title &&
+                this.artist === artist &&
+                this.album === album;
+
+            this.log("timer-fired", {
+                timerId,
+                scheduledTrack: { title, artist, album },
+                currentTrack: {
+                    title: this.title,
+                    artist: this.artist,
+                    album: this.album,
+                },
+                scrobbled: this.scrobbled,
+                activeTimerId: this.activeTimerId,
+                stillCurrent,
+            });
+            if (!stillCurrent) return;
+
+            this.scrobbleTimer = null;
+            this.activeTimerId = null;
+            this.scrobbled = true;
+            this.log("scrobble-dispatched", {
+                timerId,
+                title,
+                artist,
+                album,
+                startedAtSeconds: this.startedAtSeconds,
+            });
+            void this.submit("track.scrobble", snapshot, this.startedAtSeconds).catch(
                 (error) => {
-                    console.error("Last.fm scrobble request failed:", error);
+                    this.log("scrobble-failed", { timerId, error: String(error) });
                 },
             );
-        }
+        }, remainingSeconds * 1_000);
+
+        this.scrobbleTimer = timer;
+        this.activeTimerId = timerId;
+        this.log("timer-scheduled", {
+            timerId,
+            title,
+            artist,
+            album,
+            elapsedSeconds,
+            durationSeconds,
+            thresholdSeconds,
+            remainingSeconds,
+            startedAtSeconds: this.startedAtSeconds,
+            firesAt: new Date(Date.now() + remainingSeconds * 1_000).toISOString(),
+        });
+    }
+
+    private cancelScrobbleTimer(reason: string): void {
+        if (!this.scrobbleTimer) return;
+        this.log("timer-canceled", { timerId: this.activeTimerId, reason });
+        clearTimeout(this.scrobbleTimer);
+        this.scrobbleTimer = null;
+        this.activeTimerId = null;
+    }
+
+    private log(event: string, details: Record<string, unknown>): void {
+        console.log(
+            JSON.stringify({
+                source: "lastfm",
+                at: new Date().toISOString(),
+                pid: process.pid,
+                event,
+                ...details,
+            }),
+        );
     }
 
     private async submit(
@@ -282,6 +408,15 @@ class LastFmClient {
         if (snapshot.album) params.album = snapshot.album;
         if (startedAtSeconds !== undefined) params.timestamp = String(startedAtSeconds);
 
+        this.log("api-request", {
+            method,
+            artist: params.artist,
+            track: params.track,
+            album: params.album,
+            duration: params.duration,
+            timestamp: params.timestamp,
+        });
+
         params.api_sig = signLastFmParams(params, this.config.apiSecret);
         params.format = "json";
 
@@ -290,12 +425,21 @@ class LastFmClient {
             headers: { "content-type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams(params),
         });
-        const body = (await response.json().catch(() => null)) as
-            | { error?: number; message?: string }
-            | null;
+        const body = (await response.json().catch(() => null)) as Record<
+            string,
+            unknown
+        > | null;
 
-        if (!response.ok || body?.error) {
-            throw new Error(body?.message || `HTTP ${response.status}`);
+        this.log("api-response", {
+            method,
+            status: response.status,
+            ok: response.ok,
+            body,
+        });
+        const errorCode = typeof body?.error === "number" ? body.error : null;
+        const errorMessage = typeof body?.message === "string" ? body.message : null;
+        if (!response.ok || errorCode) {
+            throw new Error(errorMessage || `HTTP ${response.status}`);
         }
     }
 }
@@ -537,6 +681,34 @@ class PlayerManager {
 
         const previousActive = this.activePlayer;
         this.activePlayer = this.selectActivePlayer();
+        console.log(
+            JSON.stringify({
+                source: "player-manager",
+                at: new Date().toISOString(),
+                pid: process.pid,
+                event: "snapshot-received",
+                clientId: client.clientId,
+                updateOrder: client.updateOrder,
+                snapshot: {
+                    title: snapshot.title,
+                    artist: snapshot.artist,
+                    album: snapshot.album,
+                    playing: snapshot.playing,
+                    elapsedSeconds: snapshot.elapsedTimeMicros / 1_000_000,
+                    durationSeconds: snapshot.durationMicros / 1_000_000,
+                },
+                previousActiveClientId: previousActive?.clientId ?? null,
+                activeClientId: this.activePlayer?.clientId ?? null,
+                connectedPlayers: [...this.clients.values()]
+                    .filter((connected) => connected.role === "player")
+                    .map((connected) => ({
+                        clientId: connected.clientId,
+                        playing: connected.snapshot?.playing ?? null,
+                        title: connected.snapshot?.title ?? null,
+                        updateOrder: connected.updateOrder,
+                    })),
+            }),
+        );
         if (this.activePlayer !== previousActive || this.activePlayer === client) {
             this.publishActiveSnapshot();
         }
@@ -611,7 +783,7 @@ class PlayerManager {
         this.currentSnapshot = null;
         this.broadcastState(null);
         this.arRpc.clear();
-        this.lastFm?.clear();
+        this.lastFm?.pause();
     }
 
     private broadcastState(snapshot: PlayerSnapshot | null): void {

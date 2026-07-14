@@ -35,6 +35,7 @@ export default defineContentScript({
         let lastObservedMetadata: MediaMetadata | null = null;
         let currentMetadata: MetadataPayload | null = null;
         let currentPlayerState: PlayerStatePayload | null = null;
+        let waitingForTrackStart = false;
         let lastPlayerStateKey = "";
         let videoElement: HTMLVideoElement | null = null;
         let playerBarElement: Element | null = null;
@@ -339,6 +340,11 @@ export default defineContentScript({
                 timestampEpochMicros: Date.now() * 1000,
             };
 
+            if (waitingForTrackStart) {
+                if (payload.elapsedTimeMicros > 1_000_000) return;
+                waitingForTrackStart = false;
+            }
+
             const nextKey = [
                 payload.playing ? "1" : "0",
                 payload.durationMicros,
@@ -441,6 +447,11 @@ export default defineContentScript({
             const metadataKey = `${title}::${artist}::${album}::${artworkUrl}`;
 
             if (metadataKey !== lastSentMetadataKey) {
+                const trackChanged =
+                    currentMetadata !== null &&
+                    (title !== currentMetadata.title ||
+                        artist !== currentMetadata.artist);
+
                 lastSentMetadataKey = metadataKey;
                 lastFetchedBrowseId = "";
                 inFlightBrowseId = "";
@@ -451,7 +462,17 @@ export default defineContentScript({
                     artworkUrl,
                     lyrics: null,
                 };
-                emitPlayerState(true);
+
+                if (trackChanged) {
+                    // YouTube briefly pairs new metadata with the previous track's
+                    // position while changing tracks. Wait for the new position.
+                    waitingForTrackStart = true;
+                    currentPlayerState = null;
+                } else if (currentPlayerState) {
+                    emitSnapshot();
+                } else {
+                    emitPlayerState(true);
+                }
             }
 
             const player = document.querySelector("ytmusic-player-page");

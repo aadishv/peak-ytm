@@ -8,7 +8,7 @@
     "dev": "wxt",
     "build": "wxt build",
     "compile": "tsc --noEmit",
-    "host": "node ./host.ts",
+    "host": "node ./host.ts > /tmp/ytm-log.txt",
     "postinstall": "wxt prepare"
   },
   "dependencies": {
