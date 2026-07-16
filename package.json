@@ -8,7 +8,7 @@
     "dev": "wxt",
     "build": "wxt build",
     "compile": "tsc --noEmit",
-    "host": "tsx ./host.ts > /tmp/ytm-log.txt",
+    "host": "tsx ./host.ts",
     "postinstall": "wxt prepare"
   },
   "dependencies": {

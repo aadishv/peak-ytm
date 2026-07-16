@@ -102,11 +102,25 @@ class Relay {
             case "SONG_UPDATE":
             case "LYRICS_UPDATE":
             case "PLAYBACK_UPDATE": {
-                if (message.type === "SONG_UPDATE") this.lastSong = message;
-                else if (message.type === "LYRICS_UPDATE")
-                    this.lastLyrics = message;
-                else if (message.type === "PLAYBACK_UPDATE")
-                    this.lastPlayback = message;
+                if (message.type === "SONG_UPDATE") {
+                    if (JSON.stringify(message) !== JSON.stringify(this.lastSong)) {
+                        this.lastSong = message;
+                    } else {
+                        return;
+                    }
+                } else if (message.type === "LYRICS_UPDATE") {
+                    if (JSON.stringify(message) !== JSON.stringify(this.lastLyrics)) {
+                        this.lastLyrics = message;
+                    } else {
+                        return;
+                    }
+                } else if (message.type === "PLAYBACK_UPDATE") {
+                    if (JSON.stringify(message) !== JSON.stringify(this.lastPlayback)) {
+                        this.lastPlayback = message;
+                    } else {
+                        return;
+                    }
+                }
                 for (const visualizer of this.visualizerClients) {
                     Relay.sendJson(visualizer, message);
                 }
@@ -499,9 +513,6 @@ class LastFm {
     }
 
     listener(message: EventMessage) {
-        if (message.type !== "PLAYBACK_UPDATE") {
-            console.log(message);
-        }
         void (async () => {
             if (message.type === "CLEAR") {
                 this.state.song = null;
