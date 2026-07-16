@@ -10,16 +10,14 @@ export default defineContentScript({
     world: "MAIN",
     runAt: "document_start",
     main() {
-        const NativeMediaMetadata = window.MediaMetadata;
-        const mediaSession = navigator.mediaSession;
-        if (!NativeMediaMetadata || !mediaSession) return;
+
 
         // videoId is the identity key that joins song and lyrics together.
         let currentVideoId = "";
         let currentSongKey = "";
         let lastFetchedVideoId = "";
         let inFlightLyricsVideoId = "";
-        let lastObservedMetadata: MediaMetadata | null = null;
+        let stopWatchingTrack: (() => void) | null = null;
         let waitingForTrackStart = false;
         let lastPlaybackKey = "";
         let videoElement: HTMLVideoElement | null = null;
@@ -39,26 +37,105 @@ export default defineContentScript({
             postMainMessage("SONG_UPDATE", song);
         }
 
-        function getVideoId(): string {
-            const player = document.querySelector("#movie_player") as {
-                getVideoData?: () => { video_id?: string } | undefined;
-            } | null;
-            const videoId = player?.getVideoData?.()?.video_id;
-            if (typeof videoId === "string" && videoId) return videoId;
+        type YtmTrack = {
+            videoId: string | null;
+            title: string | null;
+            artist: string | null;
+            album: string | null;
+            artworkUrl: string | null;
+            durationMs: number | null;
+        };
 
-            return new URLSearchParams(window.location.search).get("v") ?? "";
+        function getYtmTrack(): YtmTrack {
+            const app = document.querySelector("ytmusic-app") as any;
+            const api = app?.playerApi;
+            const store = app?.playerUiService?.store?.store;
+            const details =
+                api?.getPlayerResponse?.()?.videoDetails ??
+                api?.getVideoData?.() ??
+                {};
+
+            const videoId = details.videoId ?? details.video_id ?? null;
+            const state = store?.getState?.();
+            const entity = Object.values(
+                state?.entities?.musicTrack ?? {},
+            ).find((track: any) => track?.videoId === videoId) as any;
+            const overlay =
+                state?.playerPage?.playerOverlay?.playerOverlayRenderer;
+            const overlayVideoId = overlay?.actions
+                ?.map(
+                    (action: any) =>
+                        action?.likeButtonRenderer?.target?.videoId,
+                )
+                .find(Boolean);
+            const overlayIsCurrent =
+                !overlayVideoId || overlayVideoId === videoId;
+            const albumRuns = overlayIsCurrent
+                ? overlay?.browserMediaSession?.browserMediaSessionRenderer?.album
+                      ?.runs
+                : null;
+            const album =
+                albumRuns
+                    ?.map((run: any) => run?.text ?? "")
+                    .join("") || null;
+            const thumbnails =
+                entity?.thumbnailDetails?.thumbnails ??
+                details?.thumbnail?.thumbnails ??
+                [];
+            const artworkUrl = [...thumbnails]
+                .filter((thumbnail: any) => thumbnail?.url)
+                .sort(
+                    (a: any, b: any) =>
+                        (b.width ?? 0) - (a.width ?? 0),
+                )[0]?.url ?? null;
+            const durationMs =
+                Number(api?.getDuration?.()) * 1000 ||
+                Number(entity?.lengthMs) ||
+                Number(details.lengthSeconds) * 1000 ||
+                null;
+
+            return {
+                videoId,
+                title: entity?.title ?? details.title ?? null,
+                artist: entity?.artistNames ?? details.author ?? null,
+                album: album ?? entity?.albumTitle ?? null,
+                artworkUrl,
+                durationMs,
+            };
         }
 
-        function getHighestResolutionArtwork(
-            artwork?: readonly MediaImage[],
-        ): string | null {
-            const getWidth = (item: MediaImage) =>
-                Number.parseInt(item.sizes?.match(/(\d+)x/)?.[1] ?? "0", 10);
-            return (
-                artwork
-                    ?.filter((art) => !!art.src)
-                    .sort((a, b) => getWidth(b) - getWidth(a))[0]?.src ?? null
-            );
+        function getVideoId(): string {
+            return getYtmTrack().videoId ?? "";
+        }
+
+        function watchYtmTrack(callback: (track: YtmTrack) => void) {
+            const app = document.querySelector("ytmusic-app") as any;
+            const api = app?.playerApi;
+            const store = app?.playerUiService?.store?.store;
+            if (!api?.addEventListener || !store?.subscribe) return null;
+
+            let previous = "";
+            const publish = () => {
+                const track = getYtmTrack();
+                const fingerprint = JSON.stringify(track);
+                if (fingerprint === previous) return;
+                previous = fingerprint;
+                callback(track);
+            };
+            const onVideoDataChange = (name: string) => {
+                if (["newdata", "dataloaded", "dataupdated"].includes(name)) {
+                    setTimeout(publish, 0);
+                }
+            };
+
+            api.addEventListener("videodatachange", onVideoDataChange);
+            const unsubscribe = store.subscribe(publish);
+            publish();
+
+            return () => {
+                api.removeEventListener("videodatachange", onVideoDataChange);
+                unsubscribe();
+            };
         }
 
         function getLyricsBrowseId(nextResponse: any): string | null {
@@ -194,7 +271,7 @@ export default defineContentScript({
                 context: getMobileBrowseContext(),
                 browseId,
             });
-
+            console.log(data);
             const timedLyricsData =
                 data?.contents?.elementRenderer?.newElement?.type?.componentType
                     ?.model?.timedLyricsModel?.lyricsData?.timedLyricsData;
@@ -289,31 +366,7 @@ export default defineContentScript({
             return Number.isFinite(numeric) ? numeric : 0;
         }
 
-        function readDurationSeconds(video: HTMLVideoElement, progressBar: Element | null) {
-            const progressMax = Number(
-                progressBar?.getAttribute("max") ??
-                    progressBar?.getAttribute("aria-valuemax") ??
-                    NaN,
-            );
 
-            if (Number.isFinite(progressMax) && progressMax > 0) {
-                return progressMax;
-            }
-
-            return Number.isFinite(video.duration) && video.duration > 0
-                ? video.duration
-                : 0;
-        }
-
-        function readDurationMicros(): number {
-            const video = videoElement ?? document.querySelector("video");
-            if (!(video instanceof HTMLVideoElement)) return 0;
-
-            const progressBar =
-                progressBarElement ?? document.querySelector("#progress-bar");
-            const durationSeconds = Math.max(0, readDurationSeconds(video, progressBar));
-            return Math.round(durationSeconds * 1_000_000);
-        }
 
         function emitPlayback(force = false) {
             const video = videoElement ?? document.querySelector("video");
@@ -392,23 +445,6 @@ export default defineContentScript({
             });
         }
 
-        function setupPlayerBarListeners(playerBar: Element) {
-            if ((playerBar as { __ytmVideoDataChangeInstalled?: boolean }).__ytmVideoDataChangeInstalled) {
-                return;
-            }
-
-            (playerBar as { __ytmVideoDataChangeInstalled?: boolean }).__ytmVideoDataChangeInstalled = true;
-            playerBarElement = playerBar;
-
-            playerBar.addEventListener("videodatachange", () => {
-                maybeAttachPageObservers();
-                const metadata = navigator.mediaSession.metadata ?? lastObservedMetadata;
-                if (metadata) {
-                    void checkAndUpdate(metadata);
-                }
-                emitPlayback(true);
-            });
-        }
 
         function maybeAttachPageObservers() {
             const video = document.querySelector("video");
@@ -421,21 +457,29 @@ export default defineContentScript({
                 setupProgressBarObserver(progressBar);
             }
 
-            const playerBar = document.querySelector("ytmusic-player-bar");
-            if (playerBar) {
-                setupPlayerBarListeners(playerBar);
+            playerBarElement = document.querySelector("ytmusic-player-bar");
+
+            if (!stopWatchingTrack) {
+                // watchYtmTrack publishes synchronously, so guard against its
+                // callback re-entering this setup before it returns.
+                stopWatchingTrack = () => {};
+                stopWatchingTrack = watchYtmTrack((track) => {
+                    maybeAttachPageObservers();
+                    void checkAndUpdate(track);
+                    emitPlayback(true);
+                });
             }
         }
 
-        async function checkAndUpdate(metadata: MediaMetadata) {
-            const title = metadata.title || "";
-            const artist = metadata.artist || "";
-            const album = metadata.album || "";
-            const artworkUrl = getHighestResolutionArtwork(metadata.artwork);
-            const videoId = getVideoId();
+        async function checkAndUpdate(track: YtmTrack) {
+            const title = track.title || "";
+            const artist = track.artist || "";
+            const album = track.album || "";
+            const artworkUrl = track.artworkUrl;
+            const videoId = track.videoId ?? "";
             if (!videoId) return;
 
-            const durationMicros = readDurationMicros();
+            const durationMicros = Math.round((track.durationMs ?? 0) * 1000);
             const songKey = `${videoId}::${title}::${artist}::${album}::${artworkUrl}::${durationMicros}`;
 
             if (songKey !== currentSongKey) {
@@ -495,43 +539,7 @@ export default defineContentScript({
             }
         }
 
-        function observeMetadata(metadata: MediaMetadata | null | undefined) {
-            if (!metadata) return;
-            lastObservedMetadata = metadata;
-            void checkAndUpdate(metadata);
-        }
 
-        const mediaSessionPrototype = Object.getPrototypeOf(mediaSession);
-        const metadataDescriptor = Object.getOwnPropertyDescriptor(
-            mediaSessionPrototype,
-            "metadata",
-        );
-
-        if (metadataDescriptor?.get && metadataDescriptor.set) {
-            Object.defineProperty(mediaSessionPrototype, "metadata", {
-                configurable: true,
-                enumerable: metadataDescriptor.enumerable ?? false,
-                get() {
-                    return metadataDescriptor.get!.call(this);
-                },
-                set(value: MediaMetadata | null) {
-                    metadataDescriptor.set!.call(this, value);
-                    if (this === mediaSession) observeMetadata(value);
-                },
-            });
-        } else {
-            class PatchedMediaMetadata extends NativeMediaMetadata {
-                constructor(init?: MediaMetadataInit) {
-                    super(init);
-                    observeMetadata(this);
-                }
-            }
-
-            Object.defineProperty(PatchedMediaMetadata, "name", {
-                value: "MediaMetadata",
-            });
-            (window as any).MediaMetadata = PatchedMediaMetadata;
-        }
 
         const pageObserver = new MutationObserver(() => {
             maybeAttachPageObservers();
@@ -596,8 +604,9 @@ export default defineContentScript({
         });
 
         setInterval(() => {
-            const metadata = navigator.mediaSession.metadata ?? lastObservedMetadata;
-            if (metadata) void checkAndUpdate(metadata);
+            if (!stopWatchingTrack) maybeAttachPageObservers();
+            const track = getYtmTrack();
+            if (track.videoId) void checkAndUpdate(track);
             emitPlayback(true);
         }, 1500);
     },

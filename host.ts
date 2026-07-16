@@ -499,6 +499,9 @@ class LastFm {
     }
 
     listener(message: EventMessage) {
+        if (message.type !== "PLAYBACK_UPDATE") {
+            console.log(message);
+        }
         void (async () => {
             if (message.type === "CLEAR") {
                 this.state.song = null;

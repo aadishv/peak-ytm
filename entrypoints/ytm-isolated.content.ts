@@ -19,7 +19,7 @@ export default defineContentScript({
 
         let socket: WebSocket | null = null;
         let reconnectTimer: number | null = null;
-        let lastSnapshot: PlayerSnapshot | null = null;
+        const lastMessages = new Map<ClientMessage["type"], ClientMessage>();
         let loggedUnavailable = false;
 
         function send(message: ClientMessage): void {
@@ -51,8 +51,8 @@ export default defineContentScript({
             nextSocket.addEventListener("open", () => {
                 loggedUnavailable = false;
                 send({ type: "HELLO", role: "player", clientId });
-                if (lastSnapshot) {
-                    send({ type: "PLAYER_SNAPSHOT", payload: lastSnapshot });
+                for (const message of lastMessages.values()) {
+                    send(message);
                 }
             });
 
@@ -101,9 +101,21 @@ export default defineContentScript({
                 return;
             }
 
-            const snapshot = event.data.payload;
-            lastSnapshot = snapshot;
-            send({ type: "PLAYER_SNAPSHOT", payload: snapshot });
+            const message = {
+                type: event.data.type,
+                payload: event.data.payload,
+            };
+            if (!Value.Check(ClientMessageSchema, message)) return;
+            if (
+                message.type !== "SONG_UPDATE" &&
+                message.type !== "LYRICS_UPDATE" &&
+                message.type !== "PLAYBACK_UPDATE"
+            ) {
+                return;
+            }
+
+            lastMessages.set(message.type, message);
+            send(message);
         });
 
         connect();
