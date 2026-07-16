@@ -1,8 +1,9 @@
+import { Value } from "@sinclair/typebox/value";
 import {
-    isPlayerSnapshot,
-    isServerMessage,
+    ClientMessageSchema,
+    ServerMessage,
+    ServerMessageSchema,
     type ClientMessage,
-    type PlayerSnapshot,
 } from "../shared/protocol";
 
 export default defineContentScript({
@@ -56,13 +57,12 @@ export default defineContentScript({
             });
 
             nextSocket.addEventListener("message", (event) => {
-                let message: unknown;
+                let message: ServerMessage;
                 try {
-                    message = JSON.parse(String(event.data));
+                    message = Value.Parse(ServerMessageSchema, JSON.parse(String(event.data)));
                 } catch {
                     return;
                 }
-                if (!isServerMessage(message)) return;
 
                 if (message.type === "COMMAND" || message.type === "SEEK") {
                     window.postMessage(
@@ -96,9 +96,7 @@ export default defineContentScript({
             if (
                 event.source !== window ||
                 !event.data ||
-                event.data.source !== "ytm-main" ||
-                event.data.type !== "PLAYER_SNAPSHOT" ||
-                !isPlayerSnapshot(event.data.payload)
+                event.data.source !== "ytm-main"
             ) {
                 return;
             }

@@ -28,7 +28,8 @@ function App() {
         handleSeekCommit,
         handleSeekInput,
         imageUrl,
-        mediaState,
+        hasSong,
+        playing,
         artist,
         album,
         progressRatio,
@@ -114,9 +115,9 @@ function App() {
         return () => {
             observer.disconnect();
         };
-    }, [imageUrl, mediaState?.durationMicros, title, artist, album]);
+    }, [imageUrl, durationMicros, title, artist, album]);
 
-    if (!mediaState && !imageUrl && !title && !artist && !album) {
+    if (!hasSong && !imageUrl && !title && !artist && !album) {
         return (
             <div className="flex h-screen w-screen items-center justify-center bg-black text-white font-sans text-xl">
                 Open YouTube Music and start playing a track...
@@ -145,11 +146,7 @@ function App() {
                     </p>
 
                     <div
-                        className={
-                            mediaState?.durationMicros
-                                ? "mt-5 sm:mt-6"
-                                : "hidden"
-                        }
+                        className={durationMicros ? "mt-5 sm:mt-6" : "hidden"}
                     >
                         <div className="relative">
                             <div className="h-2 w-full overflow-hidden rounded-full bg-white/20">
@@ -207,9 +204,7 @@ function App() {
                                     void handleCommand("_");
                                 }}
                             >
-                                {mediaState?.playing
-                                    ? SYMBOLS.pause
-                                    : SYMBOLS.play}
+                                {playing ? SYMBOLS.pause : SYMBOLS.play}
                             </button>
                             <button
                                 className="size-14 flex-1 cursor-pointer disabled:opacity-50"

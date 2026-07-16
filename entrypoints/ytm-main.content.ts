@@ -1,7 +1,8 @@
 import type {
     LyricsPayload,
     LyricsTranslationLine,
-    PlayerSnapshot,
+    PlaybackUpdate,
+    SongUpdate,
 } from "../shared/protocol";
 
 export default defineContentScript({
@@ -13,30 +14,14 @@ export default defineContentScript({
         const mediaSession = navigator.mediaSession;
         if (!NativeMediaMetadata || !mediaSession) return;
 
-        type MetadataPayload = {
-            title: string;
-            artist: string;
-            album: string;
-            artworkUrl: string | null;
-            lyrics: LyricsPayload | null;
-        };
-
-        type PlayerStatePayload = {
-            playing: boolean;
-            durationMicros: number;
-            elapsedTimeMicros: number;
-            playbackRate: number;
-            timestampEpochMicros: number;
-        };
-
-        let lastSentMetadataKey = "";
-        let lastFetchedBrowseId = "";
-        let inFlightBrowseId = "";
+        // videoId is the identity key that joins song and lyrics together.
+        let currentVideoId = "";
+        let currentSongKey = "";
+        let lastFetchedVideoId = "";
+        let inFlightLyricsVideoId = "";
         let lastObservedMetadata: MediaMetadata | null = null;
-        let currentMetadata: MetadataPayload | null = null;
-        let currentPlayerState: PlayerStatePayload | null = null;
         let waitingForTrackStart = false;
-        let lastPlayerStateKey = "";
+        let lastPlaybackKey = "";
         let videoElement: HTMLVideoElement | null = null;
         let playerBarElement: Element | null = null;
         let progressBarElement: Element | null = null;
@@ -50,14 +35,18 @@ export default defineContentScript({
             return JSON.parse(JSON.stringify(value));
         }
 
-        function emitSnapshot() {
-            if (!currentMetadata || !currentPlayerState) return;
+        function emitSong(song: SongUpdate) {
+            postMainMessage("SONG_UPDATE", song);
+        }
 
-            const snapshot: PlayerSnapshot = {
-                ...currentMetadata,
-                ...currentPlayerState,
-            };
-            postMainMessage("PLAYER_SNAPSHOT", snapshot);
+        function getVideoId(): string {
+            const player = document.querySelector("#movie_player") as {
+                getVideoData?: () => { video_id?: string } | undefined;
+            } | null;
+            const videoId = player?.getVideoData?.()?.video_id;
+            if (typeof videoId === "string" && videoId) return videoId;
+
+            return new URLSearchParams(window.location.search).get("v") ?? "";
         }
 
         function getHighestResolutionArtwork(
@@ -72,13 +61,10 @@ export default defineContentScript({
             );
         }
 
-        function getLyricsBrowseId(player: any): string | null {
+        function getLyricsBrowseId(nextResponse: any): string | null {
             const tabs =
-                player?.tabs ??
-                player?.watchNextResponse?.contents
-                    ?.singleColumnMusicWatchNextResultsRenderer?.tabbedRenderer
-                    ?.watchNextTabbedResultsRenderer?.tabs ??
-                [];
+                nextResponse?.contents?.singleColumnMusicWatchNextResultsRenderer
+                    ?.tabbedRenderer?.watchNextTabbedResultsRenderer?.tabs ?? [];
 
             const lyricsTab = tabs.find(
                 (tab: any) =>
@@ -122,17 +108,20 @@ export default defineContentScript({
             return headers;
         }
 
-        function getMobileBrowseContext(targetLanguage?: string) {
+        function getMusicContext() {
             const context = (window as any).ytcfg?.get?.("INNERTUBE_CONTEXT");
             if (!context) throw new Error("Missing INNERTUBE_CONTEXT");
+            return cloneValue(context);
+        }
 
-            const cloned = cloneValue(context);
-            cloned.client.clientName = "ANDROID_MUSIC";
-            cloned.client.clientVersion = "9.24.51";
+        function getMobileBrowseContext(targetLanguage?: string) {
+            const context = getMusicContext();
+            context.client.clientName = "ANDROID_MUSIC";
+            context.client.clientVersion = "9.24.51";
             if (targetLanguage) {
-                cloned.client.hl = targetLanguage;
+                context.client.hl = targetLanguage;
             }
-            return cloned;
+            return context;
         }
 
         function findNestedValue(value: unknown, key: string): unknown {
@@ -159,13 +148,15 @@ export default defineContentScript({
             return result;
         }
 
-        async function browseMusic(body: Record<string, unknown>) {
+        async function requestMusic(
+            endpoint: "browse" | "next",
+            body: Record<string, unknown>,
+        ) {
             const apiKey = (window as any).ytcfg?.get?.("INNERTUBE_API_KEY");
             if (!apiKey) throw new Error("Missing INNERTUBE_API_KEY");
 
             const response = await fetch(
-                "/youtubei/v1/browse?prettyPrint=false&key=" +
-                    encodeURIComponent(apiKey),
+                `/youtubei/v1/${endpoint}?prettyPrint=false&key=${encodeURIComponent(apiKey)}`,
                 {
                     method: "POST",
                     credentials: "same-origin",
@@ -175,15 +166,28 @@ export default defineContentScript({
             );
 
             if (!response.ok) {
-                throw new Error(`Lyrics fetch failed with ${response.status}`);
+                throw new Error(`Lyrics ${endpoint} request failed with ${response.status}`);
             }
 
             return response.json();
         }
 
+        function browseMusic(body: Record<string, unknown>) {
+            return requestMusic("browse", body);
+        }
+
+        async function fetchLyricsBrowseId(videoId: string) {
+            const nextResponse = await requestMusic("next", {
+                context: getMusicContext(),
+                videoId,
+                enablePersistentPlaylistPanel: true,
+                isAudioOnly: true,
+            });
+            return getLyricsBrowseId(nextResponse);
+        }
+
         async function fetchLyricsPayload(
             browseId: string,
-            trackState: { title: string; artist: string; album: string },
             targetLanguage = "en",
         ): Promise<LyricsPayload | null> {
             const data = await browseMusic({
@@ -238,7 +242,7 @@ export default defineContentScript({
             }
 
             return {
-                lrc: toLrc(trackState, timedLyricsData),
+                lrc: toLrc(timedLyricsData),
                 translations,
                 translationLanguage: translations.length > 0 ? targetLanguage : null,
             };
@@ -252,21 +256,8 @@ export default defineContentScript({
             return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}`;
         }
 
-        function sanitizeLrcTag(value: string) {
-            return String(value)
-                .replace(/[\[\]\r\n]/g, " ")
-                .trim();
-        }
-
-        function toLrc(
-            trackState: { title: string; artist: string; album: string },
-            timedLyricsData: any[],
-        ) {
+        function toLrc(timedLyricsData: any[]) {
             const lines = [];
-
-            if (trackState.title) lines.push(`[ti:${sanitizeLrcTag(trackState.title)}]`);
-            if (trackState.artist) lines.push(`[ar:${sanitizeLrcTag(trackState.artist)}]`);
-            if (trackState.album) lines.push(`[al:${sanitizeLrcTag(trackState.album)}]`);
 
             for (const line of timedLyricsData) {
                 const startMs = line?.cueRange?.startTimeMilliseconds;
@@ -314,7 +305,17 @@ export default defineContentScript({
                 : 0;
         }
 
-        function emitPlayerState(force = false) {
+        function readDurationMicros(): number {
+            const video = videoElement ?? document.querySelector("video");
+            if (!(video instanceof HTMLVideoElement)) return 0;
+
+            const progressBar =
+                progressBarElement ?? document.querySelector("#progress-bar");
+            const durationSeconds = Math.max(0, readDurationSeconds(video, progressBar));
+            return Math.round(durationSeconds * 1_000_000);
+        }
+
+        function emitPlayback(force = false) {
             const video = videoElement ?? document.querySelector("video");
             if (!(video instanceof HTMLVideoElement)) return;
 
@@ -327,16 +328,10 @@ export default defineContentScript({
                 0,
                 readNumericValueFromElement(progressBar),
             );
-            const durationSeconds = Math.max(
-                0,
-                readDurationSeconds(video, progressBar),
-            );
 
-            const payload: PlayerStatePayload = {
-                playing: !video.paused,
-                durationMicros: Math.round(durationSeconds * 1_000_000),
+            const payload: PlaybackUpdate = {
+                paused: video.paused,
                 elapsedTimeMicros: Math.round(elapsedSeconds * 1_000_000),
-                playbackRate: video.paused ? 0 : video.playbackRate || 1,
                 timestampEpochMicros: Date.now() * 1000,
             };
 
@@ -345,17 +340,10 @@ export default defineContentScript({
                 waitingForTrackStart = false;
             }
 
-            const nextKey = [
-                payload.playing ? "1" : "0",
-                payload.durationMicros,
-                payload.elapsedTimeMicros,
-                payload.playbackRate,
-            ].join(":");
-
-            if (!force && nextKey === lastPlayerStateKey) return;
-            lastPlayerStateKey = nextKey;
-            currentPlayerState = payload;
-            emitSnapshot();
+            const nextKey = `${payload.paused ? "1" : "0"}:${payload.elapsedTimeMicros}`;
+            if (!force && nextKey === lastPlaybackKey) return;
+            lastPlaybackKey = nextKey;
+            postMainMessage("PLAYBACK_UPDATE", payload);
         }
 
         function setupVideoListeners(video: HTMLVideoElement) {
@@ -382,7 +370,7 @@ export default defineContentScript({
             ] as const;
 
             for (const eventName of events) {
-                video.addEventListener(eventName, () => emitPlayerState(true));
+                video.addEventListener(eventName, () => emitPlayback(true));
             }
         }
 
@@ -395,7 +383,7 @@ export default defineContentScript({
             progressBarElement = progressBar;
 
             const observer = new MutationObserver(() => {
-                emitPlayerState(true);
+                emitPlayback(true);
             });
 
             observer.observe(progressBar, {
@@ -418,7 +406,7 @@ export default defineContentScript({
                 if (metadata) {
                     void checkAndUpdate(metadata);
                 }
-                emitPlayerState(true);
+                emitPlayback(true);
             });
         }
 
@@ -444,71 +432,66 @@ export default defineContentScript({
             const artist = metadata.artist || "";
             const album = metadata.album || "";
             const artworkUrl = getHighestResolutionArtwork(metadata.artwork);
-            const metadataKey = `${title}::${artist}::${album}::${artworkUrl}`;
+            const videoId = getVideoId();
+            if (!videoId) return;
 
-            if (metadataKey !== lastSentMetadataKey) {
-                const trackChanged =
-                    currentMetadata !== null &&
-                    (title !== currentMetadata.title ||
-                        artist !== currentMetadata.artist);
+            const durationMicros = readDurationMicros();
+            const songKey = `${videoId}::${title}::${artist}::${album}::${artworkUrl}::${durationMicros}`;
 
-                lastSentMetadataKey = metadataKey;
-                lastFetchedBrowseId = "";
-                inFlightBrowseId = "";
-                currentMetadata = {
-                    title,
-                    artist,
-                    album,
-                    artworkUrl,
-                    lyrics: null,
-                };
+            if (songKey !== currentSongKey) {
+                const trackChanged = videoId !== currentVideoId;
+                currentSongKey = songKey;
+
+                if (trackChanged) {
+                    currentVideoId = videoId;
+                    lastFetchedVideoId = "";
+                    inFlightLyricsVideoId = "";
+                }
+
+                emitSong({ videoId, title, artist, album, artworkUrl, durationMicros });
 
                 if (trackChanged) {
                     // YouTube briefly pairs new metadata with the previous track's
                     // position while changing tracks. Wait for the new position.
                     waitingForTrackStart = true;
-                    currentPlayerState = null;
-                } else if (currentPlayerState) {
-                    emitSnapshot();
                 } else {
-                    emitPlayerState(true);
+                    emitPlayback(true);
                 }
             }
 
-            const player = document.querySelector("ytmusic-player-page");
-            const browseId = getLyricsBrowseId(player);
             if (
-                !browseId ||
-                browseId === lastFetchedBrowseId ||
-                browseId === inFlightBrowseId
+                videoId === lastFetchedVideoId ||
+                videoId === inFlightLyricsVideoId
             ) {
                 return;
             }
 
-            inFlightBrowseId = browseId;
+            inFlightLyricsVideoId = videoId;
             try {
-                const lyrics = await fetchLyricsPayload(browseId, {
-                    title,
-                    artist,
-                    album,
-                });
-                if (lastSentMetadataKey !== metadataKey) return;
+                // Resolve the lyrics endpoint from a watch-next request for this
+                // exact video. The player page's tabs can still belong to the
+                // previous track while YouTube Music is changing songs.
+                const lyricsBrowseId = await fetchLyricsBrowseId(videoId);
+                if (currentVideoId !== videoId || getVideoId() !== videoId) return;
 
-                lastFetchedBrowseId = browseId;
+                if (!lyricsBrowseId) {
+                    lastFetchedVideoId = videoId;
+                    return;
+                }
+
+                const lyrics = await fetchLyricsPayload(lyricsBrowseId);
+                if (currentVideoId !== videoId || getVideoId() !== videoId) return;
+
+                lastFetchedVideoId = videoId;
                 if (lyrics) {
-                    currentMetadata = {
-                        title,
-                        artist,
-                        album,
-                        artworkUrl,
-                        lyrics,
-                    };
-                    emitSnapshot();
+                    postMainMessage("LYRICS_UPDATE", { videoId, lyrics });
                 }
             } catch (error) {
                 console.error("[YTM-Main] Failed to fetch timed lyrics", error);
             } finally {
-                if (inFlightBrowseId === browseId) inFlightBrowseId = "";
+                if (inFlightLyricsVideoId === videoId) {
+                    inFlightLyricsVideoId = "";
+                }
             }
         }
 
@@ -615,7 +598,7 @@ export default defineContentScript({
         setInterval(() => {
             const metadata = navigator.mediaSession.metadata ?? lastObservedMetadata;
             if (metadata) void checkAndUpdate(metadata);
-            emitPlayerState(true);
+            emitPlayback(true);
         }, 1500);
     },
 });

@@ -9,20 +9,23 @@ import {
 } from "react";
 import Liricle from "liricle";
 import {
-    isServerMessage,
+    ServerMessage,
+    ServerMessageSchema,
     type ClientMessage,
     type CommandSymbol,
     type LyricsPayload,
     type LyricsTranslationLine,
-    type PlayerSnapshot,
+    type LyricsUpdate,
+    type PlaybackUpdate,
+    type SongUpdate,
 } from "../../shared/protocol";
+import { Value } from "@sinclair/typebox/value";
 
 type PlaybackOverride = {
     elapsedMicros: number;
     startedAtMs: number;
-    playing: boolean;
-    playbackRate: number;
-    title: string;
+    paused: boolean;
+    videoId: string;
 };
 
 declare global {
@@ -41,7 +44,9 @@ function setLrcLyricsOverride(lyrics: string | null): void {
 }
 
 function useMediaState() {
-    const [mediaState, setMediaState] = useState<PlayerSnapshot | null>(null);
+    const [song, setSong] = useState<SongUpdate | null>(null);
+    const [lyricsUpdate, setLyricsUpdate] = useState<LyricsUpdate | null>(null);
+    const [playback, setPlayback] = useState<PlaybackUpdate | null>(null);
     const [isReady, setIsReady] = useState(false);
     const socketRef = useRef<WebSocket | null>(null);
     const clientIdRef = useRef(
@@ -77,16 +82,23 @@ function useMediaState() {
             });
 
             socket.addEventListener("message", (event) => {
-                let message: unknown;
+                let message: ServerMessage;
                 try {
-                    message = JSON.parse(String(event.data));
+                    message = Value.Parse(ServerMessageSchema, JSON.parse(String(event.data)));
                 } catch {
                     return;
                 }
-                if (!isServerMessage(message)) return;
 
-                if (message.type === "STATE_UPDATE") {
-                    setMediaState(message.payload);
+                if (message.type === "SONG_UPDATE") {
+                    setSong(message.payload);
+                } else if (message.type === "LYRICS_UPDATE") {
+                    setLyricsUpdate(message.payload);
+                } else if (message.type === "PLAYBACK_UPDATE") {
+                    setPlayback(message.payload);
+                } else if (message.type === "CLEAR") {
+                    setSong(null);
+                    setLyricsUpdate(null);
+                    setPlayback(null);
                 } else if (message.type === "ERROR") {
                     console.warn(`Native manager: ${message.message}`);
                 }
@@ -97,7 +109,9 @@ function useMediaState() {
                 if (disposed) return;
 
                 setIsReady(false);
-                setMediaState(null);
+                setSong(null);
+                setLyricsUpdate(null);
+                setPlayback(null);
                 reconnectTimer = window.setTimeout(connect, reconnectDelayMs);
             });
 
@@ -138,7 +152,9 @@ function useMediaState() {
 
     return {
         isReady,
-        mediaState,
+        song,
+        lyricsUpdate,
+        playback,
         sendCommand,
         sendSeek,
     };
@@ -265,20 +281,19 @@ function useLyrics(
     };
 }
 
-function getBackendElapsedMicros(mediaState: PlayerSnapshot | null): number {
-    if (!mediaState) {
+function getBackendElapsedMicros(playback: PlaybackUpdate | null): number {
+    if (!playback) {
         return 0;
     }
 
-    const base = mediaState.elapsedTimeMicros ?? 0;
-    const timestamp = mediaState.timestampEpochMicros;
-    const playbackRate = mediaState.playbackRate ?? (mediaState.playing ? 1 : 0);
+    const base = playback.elapsedTimeMicros ?? 0;
+    const timestamp = playback.timestampEpochMicros;
 
-    if (!mediaState.playing || !timestamp || playbackRate <= 0) {
+    if (playback.paused || !timestamp) {
         return base;
     }
 
-    return Math.max(0, base + (Date.now() * 1000 - timestamp) * playbackRate);
+    return Math.max(0, base + (Date.now() * 1000 - timestamp));
 }
 
 function getOverrideElapsedMicros(override: PlaybackOverride | null): number {
@@ -286,19 +301,20 @@ function getOverrideElapsedMicros(override: PlaybackOverride | null): number {
         return 0;
     }
 
-    if (!override.playing || override.playbackRate <= 0) {
+    if (override.paused) {
         return Math.max(0, override.elapsedMicros);
     }
 
     return Math.max(
         0,
-        override.elapsedMicros +
-            (Date.now() - override.startedAtMs) * 1000 * override.playbackRate,
+        override.elapsedMicros + (Date.now() - override.startedAtMs) * 1000,
     );
 }
 
 function usePlaybackClock(
-    mediaState: PlayerSnapshot | null,
+    playback: PlaybackUpdate | null,
+    durationMicros: number,
+    videoId: string | null,
     sendSeek: (positionSeconds: number) => void,
     setStatus: Dispatch<SetStateAction<string>>,
 ) {
@@ -327,25 +343,24 @@ function usePlaybackClock(
             return;
         }
 
-        const backendElapsed = mediaState?.elapsedTimeMicros ?? 0;
+        const backendElapsed = playback?.elapsedTimeMicros ?? 0;
         const overrideElapsed = getOverrideElapsedMicros(playbackOverride);
 
         if (
-            !mediaState?.title ||
-            mediaState.title !== playbackOverride.title ||
+            !videoId ||
+            videoId !== playbackOverride.videoId ||
             Math.abs(backendElapsed - overrideElapsed) < 1_750_000
         ) {
             setPlaybackOverride(null);
         }
-    }, [mediaState, playbackOverride]);
+    }, [playback, videoId, playbackOverride]);
 
-    const durationMicros = mediaState?.durationMicros ?? 0;
     const elapsedMicros =
         isSeeking && pendingSeekMicros !== null
             ? pendingSeekMicros
             : playbackOverride
               ? getOverrideElapsedMicros(playbackOverride)
-              : getBackendElapsedMicros(mediaState);
+              : getBackendElapsedMicros(playback);
     const progressRatio =
         durationMicros > 0 ? Math.min(elapsedMicros / durationMicros, 1) : 0;
 
@@ -372,10 +387,8 @@ function usePlaybackClock(
         setPlaybackOverride({
             elapsedMicros: targetMicros,
             startedAtMs: Date.now(),
-            playing: Boolean(mediaState?.playing),
-            playbackRate:
-                mediaState?.playbackRate ?? (mediaState?.playing ? 1 : 0),
-            title: mediaState?.title ?? "",
+            paused: playback?.paused ?? true,
+            videoId: videoId ?? "",
         });
 
         try {
@@ -385,17 +398,15 @@ function usePlaybackClock(
             setStatus(error instanceof Error ? error.message : "Seek failed");
         }
     }, [
+        videoId,
         durationMicros,
-        mediaState?.playing,
-        mediaState?.playbackRate,
-        mediaState?.title,
         pendingSeekMicros,
+        playback?.paused,
         sendSeek,
         setStatus,
     ]);
 
     return {
-        durationMicros,
         elapsedMicros,
         handleSeekCommit,
         handleSeekInput,
@@ -413,31 +424,47 @@ if (typeof window !== "undefined") {
 }
 
 export function useSongState() {
-    const { isReady, mediaState, sendCommand, sendSeek } =
+    const { isReady, song, lyricsUpdate, playback, sendCommand, sendSeek } =
         useMediaState();
     const [status, setStatus] = useState("Connecting…");
 
-    const imageUrl = mediaState?.artworkUrl ?? null;
+    const imageUrl = song?.artworkUrl ?? null;
+    const durationMicros = song?.durationMicros ?? 0;
+    const playing = playback ? !playback.paused : false;
+    const hasSong = song !== null;
+
+    // Lyrics only apply to the current track: unless the latest lyrics update
+    // matches the current song's videoId, they are treated as absent so stale
+    // lyrics from the previous track are never shown.
+    const activeLyrics =
+        song && lyricsUpdate && lyricsUpdate.videoId === song.videoId
+            ? lyricsUpdate.lyrics
+            : null;
 
     const {
-        durationMicros,
         elapsedMicros,
         handleSeekCommit,
         handleSeekInput,
         progressRatio,
-    } = usePlaybackClock(mediaState, sendSeek, setStatus);
+    } = usePlaybackClock(
+        playback,
+        durationMicros,
+        song?.videoId ?? null,
+        sendSeek,
+        setStatus,
+    );
     const controlsBusy = !isReady;
 
-    const lyrics = useLyrics(mediaState?.lyrics ?? null, elapsedMicros);
+    const lyrics = useLyrics(activeLyrics, elapsedMicros);
 
     useEffect(() => {
-        if (!mediaState?.title) {
+        if (!song?.title) {
             setStatus(isReady ? "Idle" : "Connecting…");
             return;
         }
 
-        setStatus(mediaState.playing ? "Playing" : "Paused");
-    }, [isReady, mediaState]);
+        setStatus(playing ? "Playing" : "Paused");
+    }, [isReady, song, playing]);
 
     const handleCommand = useCallback(
         async (command: CommandSymbol): Promise<void> => {
@@ -460,12 +487,13 @@ export function useSongState() {
         handleSeekCommit,
         handleSeekInput,
         imageUrl,
-        mediaState,
+        hasSong,
+        playing,
         progressRatio,
         status,
-        title: mediaState?.title ?? "",
-        artist: mediaState?.artist ?? null,
-        album: mediaState?.album ?? null,
+        title: song?.title ?? "",
+        artist: song?.artist ?? null,
+        album: song?.album ?? null,
         lyrics,
     };
 }

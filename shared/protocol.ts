@@ -1,121 +1,122 @@
-export type LyricsTranslationLine = {
-    startTimeMs: number;
-    text: string;
-};
+import { Type, type Static } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 
-export type LyricsPayload = {
-    lrc: string;
-    translations: LyricsTranslationLine[];
-    translationLanguage: string | null;
-};
+export const LyricsTranslationLineSchema = Type.Object({
+    startTimeMs: Type.Number({ minimum: 0 }),
+    text: Type.String(),
+});
 
-export type PlayerSnapshot = {
-    title: string;
-    artist: string;
-    album: string;
-    artworkUrl: string | null;
-    lyrics: LyricsPayload | null;
-    playing: boolean;
-    durationMicros: number;
-    elapsedTimeMicros: number;
-    timestampEpochMicros: number;
-    playbackRate: number;
-};
+export const LyricsPayloadSchema = Type.Object({
+    lrc: Type.String(),
+    translations: Type.Array(LyricsTranslationLineSchema),
+    translationLanguage: Type.Union([Type.String(), Type.Null()]),
+});
 
-export const COMMAND_SYMBOLS = ["<", "_", ">", ">>", "<<", "|<<", "|>>"] as const;
-export type CommandSymbol = (typeof COMMAND_SYMBOLS)[number];
-export type ClientRole = "player" | "visualizer";
+// videoId is the single identity key that joins a song to its lyrics.
+export const SongUpdateSchema = Type.Object({
+    videoId: Type.String({ minLength: 1 }),
+    title: Type.String(),
+    artist: Type.String(),
+    album: Type.String(),
+    artworkUrl: Type.Union([Type.String(), Type.Null()]),
+    durationMicros: Type.Number({ minimum: 0 }),
+});
 
-export type ClientMessage =
-    | { type: "HELLO"; role: ClientRole; clientId: string }
-    | { type: "PLAYER_SNAPSHOT"; payload: PlayerSnapshot }
-    | { type: "COMMAND"; command: CommandSymbol }
-    | { type: "SEEK"; position: number };
+export const LyricsUpdateSchema = Type.Object({
+    videoId: Type.String({ minLength: 1 }),
+    lyrics: LyricsPayloadSchema,
+});
 
-export type ServerMessage =
-    | { type: "STATE_UPDATE"; payload: PlayerSnapshot | null }
-    | { type: "COMMAND"; command: CommandSymbol }
-    | { type: "SEEK"; position: number }
-    | { type: "ERROR"; message: string };
+export const PlaybackUpdateSchema = Type.Object({
+    timestampEpochMicros: Type.Number({ minimum: 0 }),
+    elapsedTimeMicros: Type.Number({ minimum: 0 }),
+    paused: Type.Boolean(),
+});
 
-function isObject(value: unknown): value is Record<string, unknown> {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+export const CommandSymbolSchema = Type.Union([
+    Type.Literal("<"),
+    Type.Literal("_"),
+    Type.Literal(">"),
+    Type.Literal(">>"),
+    Type.Literal("<<"),
+    Type.Literal("|<<"),
+    Type.Literal("|>>"),
+]);
 
-function isFiniteNonNegativeNumber(value: unknown): value is number {
-    return typeof value === "number" && Number.isFinite(value) && value >= 0;
-}
+export const ClientRoleSchema = Type.Union([
+    Type.Literal("player"),
+    Type.Literal("visualizer"),
+]);
 
-export function isCommandSymbol(value: unknown): value is CommandSymbol {
-    return typeof value === "string" && (COMMAND_SYMBOLS as readonly string[]).includes(value);
-}
+export const SongUpdateMessageSchema = Type.Object({
+    type: Type.Literal("SONG_UPDATE"),
+    payload: SongUpdateSchema,
+});
+export const LyricsUpdateMessageSchema = Type.Object({
+    type: Type.Literal("LYRICS_UPDATE"),
+    payload: LyricsUpdateSchema,
+});
+export const PlaybackUpdateMessageSchema = Type.Object({
+    type: Type.Literal("PLAYBACK_UPDATE"),
+    payload: PlaybackUpdateSchema,
+});
+export const HelloMessageSchema = Type.Object({
+    type: Type.Literal("HELLO"),
+    role: ClientRoleSchema,
+    clientId: Type.String({ minLength: 1 }),
+});
+export const CommandMessageSchema = Type.Object({
+    type: Type.Literal("COMMAND"),
+    command: CommandSymbolSchema,
+});
+export const SeekMessageSchema = Type.Object({
+    type: Type.Literal("SEEK"),
+    position: Type.Number({ minimum: 0 }),
+});
+export const ErrorMessageSchema = Type.Object({
+    type: Type.Literal("ERROR"),
+    message: Type.String(),
+});
+export const ClearMessageSchema = Type.Object({
+    type: Type.Literal("CLEAR"),
+});
 
-export function isLyricsPayload(value: unknown): value is LyricsPayload {
-    if (!isObject(value) || typeof value.lrc !== "string") return false;
-    if (value.translationLanguage !== null && typeof value.translationLanguage !== "string") {
-        return false;
-    }
-    if (!Array.isArray(value.translations)) return false;
 
-    return value.translations.every(
-        (line) =>
-            isObject(line) &&
-            isFiniteNonNegativeNumber(line.startTimeMs) &&
-            typeof line.text === "string",
-    );
-}
+// Events flow player -> host -> visualizer. The host forwards them verbatim, so
+// they are valid in both directions.
+export const EventMessageSchema = Type.Union([
+    SongUpdateMessageSchema,
+    LyricsUpdateMessageSchema,
+    PlaybackUpdateMessageSchema,
+    ClearMessageSchema
+]);
 
-export function isPlayerSnapshot(value: unknown): value is PlayerSnapshot {
-    if (!isObject(value)) return false;
+export const ClientMessageSchema = Type.Union([
+    HelloMessageSchema,
+    SongUpdateMessageSchema,
+    LyricsUpdateMessageSchema,
+    PlaybackUpdateMessageSchema,
+    CommandMessageSchema,
+    SeekMessageSchema,
+]);
 
-    return (
-        typeof value.title === "string" &&
-        typeof value.artist === "string" &&
-        typeof value.album === "string" &&
-        (value.artworkUrl === null || typeof value.artworkUrl === "string") &&
-        (value.lyrics === null || isLyricsPayload(value.lyrics)) &&
-        typeof value.playing === "boolean" &&
-        isFiniteNonNegativeNumber(value.durationMicros) &&
-        isFiniteNonNegativeNumber(value.elapsedTimeMicros) &&
-        isFiniteNonNegativeNumber(value.timestampEpochMicros) &&
-        isFiniteNonNegativeNumber(value.playbackRate)
-    );
-}
+export const ServerMessageSchema = Type.Union([
+    SongUpdateMessageSchema,
+    LyricsUpdateMessageSchema,
+    PlaybackUpdateMessageSchema,
+    CommandMessageSchema,
+    SeekMessageSchema,
+    ErrorMessageSchema,
+    ClearMessageSchema
+]);
 
-export function isClientMessage(value: unknown): value is ClientMessage {
-    if (!isObject(value) || typeof value.type !== "string") return false;
-
-    switch (value.type) {
-        case "HELLO":
-            return (
-                (value.role === "player" || value.role === "visualizer") &&
-                typeof value.clientId === "string" &&
-                value.clientId.trim().length > 0
-            );
-        case "PLAYER_SNAPSHOT":
-            return isPlayerSnapshot(value.payload);
-        case "COMMAND":
-            return isCommandSymbol(value.command);
-        case "SEEK":
-            return isFiniteNonNegativeNumber(value.position);
-        default:
-            return false;
-    }
-}
-
-export function isServerMessage(value: unknown): value is ServerMessage {
-    if (!isObject(value) || typeof value.type !== "string") return false;
-
-    switch (value.type) {
-        case "STATE_UPDATE":
-            return value.payload === null || isPlayerSnapshot(value.payload);
-        case "COMMAND":
-            return isCommandSymbol(value.command);
-        case "SEEK":
-            return isFiniteNonNegativeNumber(value.position);
-        case "ERROR":
-            return typeof value.message === "string";
-        default:
-            return false;
-    }
-}
+export type LyricsTranslationLine = Static<typeof LyricsTranslationLineSchema>;
+export type LyricsPayload = Static<typeof LyricsPayloadSchema>;
+export type SongUpdate = Static<typeof SongUpdateSchema>;
+export type LyricsUpdate = Static<typeof LyricsUpdateSchema>;
+export type PlaybackUpdate = Static<typeof PlaybackUpdateSchema>;
+export type CommandSymbol = Static<typeof CommandSymbolSchema>;
+export type ClientRole = Static<typeof ClientRoleSchema>;
+export type EventMessage = Static<typeof EventMessageSchema>;
+export type ClientMessage = Static<typeof ClientMessageSchema>;
+export type ServerMessage = Static<typeof ServerMessageSchema>;
